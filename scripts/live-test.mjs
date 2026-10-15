@@ -195,6 +195,13 @@ async function main() {
     check("save reports the new profile", lastNotification((text) => text.includes('saved profile "snapshot"')) !== undefined, notifications.slice(-2).join(" | "));
     await runSlash("/switch list");
     check("saved profile appears in the list", (lastNotification((text) => text.includes("active profile")) ?? "").includes("snapshot"), notifications.slice(-1)[0]);
+    await runSlash("/switch nosuchprofile");
+    check(
+      "an unknown profile reports an error naming the known ones",
+      lastNotification((text) => text.includes("Unknown profile") && text.includes("Known profiles")) !== undefined,
+      notifications.slice(-1)[0],
+    );
+
     await runSlash("/switch save doctor");
     check("save rejects a name shadowed by a subcommand", lastNotification((text) => text.includes("is a subcommand")) !== undefined, notifications.slice(-1)[0]);
     await runSlash("/switch delete snapshot");
@@ -252,6 +259,37 @@ async function main() {
       "tools from re-enabled packages are configured again",
       /ast_grep_search|lens_diagnostic_mark|browser_navigate|web_search/.test(coderDoctor),
       coderDoctor.match(/configured tools[^\n]*/)?.[0] ?? coderDoctor,
+    );
+
+    // A profile created by /switch save must be switchable, and restore must undo exactly one switch.
+    await runSlash("/switch save last");
+    check("save reports the second saved profile", lastNotification((text) => text.includes('saved profile "last"')) !== undefined, notifications.slice(-1)[0]);
+
+    await runSlash("/switch last");
+    const appliedSaved = await waitFor(
+      () => lastNotification((text) => text.includes('profile "last"')) !== undefined,
+      120_000,
+      "switch last summary notification",
+    );
+    check("a saved profile can be switched to", appliedSaved, notifications.slice(-2).join(" | "));
+
+    await runSlash("/switch restore");
+    await waitFor(() => lastNotification((text) => text.includes("restored")) !== undefined, 120_000, "restore after the saved profile");
+    const backAfterSaved = readSettings();
+    check(
+      "restore undoes exactly the last switch",
+      JSON.stringify(backAfterSaved.theme) === JSON.stringify(afterCoder.theme)
+        && JSON.stringify(backAfterSaved.packages) === JSON.stringify(afterCoder.packages)
+        && JSON.stringify(backAfterSaved.defaultTools) === JSON.stringify(afterCoder.defaultTools),
+      { theme: backAfterSaved.theme, packages: (backAfterSaved.packages ?? []).length, defaultTools: backAfterSaved.defaultTools },
+    );
+    await runSlash("/switch doctor");
+    await waitFor(() => lastNotification((text) => text.includes("active tools")) !== undefined, 60_000, "doctor report after restore");
+    const doctorAfterRestore = lastNotification((text) => text.includes("active tools")) ?? "";
+    check(
+      "restore re-activates the profile it returns to",
+      doctorAfterRestore.includes('Settings match profile "coder"'),
+      doctorAfterRestore.slice(-200),
     );
   } finally {
     child.stdin.end();

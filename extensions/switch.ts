@@ -818,6 +818,15 @@ function handleRefresh(env: SwitchEnv): void {
   ctx.ui.notify("/switch refresh: base snapshot updated from settings.json", "info");
 }
 
+/**
+ * The profile a restore should re-activate. The profile recorded before the switch may
+ * have been deleted since, and claiming it would put a nonexistent name in the footer.
+ */
+export function restoreActiveProfile(fromProfile: string | null | undefined, profiles: Record<string, Profile>): string | undefined {
+  if (fromProfile === null || fromProfile === undefined) return undefined;
+  return profiles[fromProfile] !== undefined ? fromProfile : undefined;
+}
+
 async function handleRestore(env: SwitchEnv): Promise<void> {
   const { ctx, store, settingsPath, currentSettings } = env;
   const snapshot = store.history[store.history.length - 1];
@@ -828,9 +837,15 @@ async function handleRestore(env: SwitchEnv): Promise<void> {
   store.history = store.history.slice(0, -1);
   const changes = diffSettings(currentSettings, snapshot.settings);
   writeManagedSettings(settingsPath, snapshot.settings);
-  store.activeProfile = snapshot.fromProfile ?? undefined;
+  const backTo = restoreActiveProfile(snapshot.fromProfile, store.profiles);
+  store.activeProfile = backTo;
   saveStore(store, env.agentDir);
-  await reloadWithSummary(ctx, `restored ${snapshot.fromProfile ?? "previous configuration"}`, changes);
+  const label = snapshot.fromProfile === null || snapshot.fromProfile === undefined
+    ? "previous configuration"
+    : backTo !== undefined
+      ? snapshot.fromProfile
+      : `the settings of "${snapshot.fromProfile}", which has since been deleted`;
+  await reloadWithSummary(ctx, `restored ${label}`, changes);
 }
 
 function handleSave(env: SwitchEnv, name: string | undefined): void {

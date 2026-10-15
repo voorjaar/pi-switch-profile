@@ -26,6 +26,7 @@ import {
   parseModelSpec,
   profileFromSettings,
   profilesExtending,
+  restoreActiveProfile,
   profileNames,
   resolveProfile,
   saveStore,
@@ -224,6 +225,12 @@ check(
   profilesExtending(profiles, "parent"),
 );
 check("a profile with nothing inheriting from it reports none", profilesExtending(profiles, "zen").length === 0);
+
+/* ---------------- restore target ---------------- */
+
+check("restore does not re-activate a profile deleted since the switch", restoreActiveProfile("zen", { coder: {} }) === undefined);
+check("restore re-activates a profile that still exists", restoreActiveProfile("coder", { coder: {}, zen: {} }) === "coder");
+check("a switch with no previous profile restores to no profile", restoreActiveProfile(null, { coder: {} }) === undefined);
 
 /* ---------------- settings build ---------------- */
 

@@ -28,6 +28,8 @@ All notable changes to pi-switch-config are documented here.
 
 ### Fixed
 
+- Fixed `/switch restore` re-activating a profile that had been deleted since the switch: the footer no longer
+  names a profile that does not exist, and the report says the settings were restored from a since-deleted profile.
 - Fixed profile switches being sticky: a managed key that neither the profile nor the base snapshot defines is
   now removed from `settings.json` instead of keeping the value an earlier profile wrote. `/switch coder` now
   really clears the tool list `/switch zen` set, and `/switch restore` is a complete undo.
