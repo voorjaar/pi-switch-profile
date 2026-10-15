@@ -670,6 +670,17 @@ async function showProfile(
   showLong(ctx, lines);
 }
 
+/** Everything a subcommand needs: the live session, the store, and the settings as they are now. */
+interface SwitchEnv {
+  pi: ExtensionAPI;
+  ctx: ExtensionCommandContext;
+  agentDir: string;
+  packageRoot: string;
+  store: Store;
+  settingsPath: string;
+  currentSettings: ManagedSettings;
+}
+
 async function handleSwitch(
   pi: ExtensionAPI,
   args: string,
@@ -682,170 +693,173 @@ async function handleSwitch(
   const settingsPath = join(agentDir, SETTINGS_FILE_NAME);
   const currentSettings = captureManagedSettings(readJsonFile(settingsPath));
 
-  if (ensureBase(store, currentSettings)) {
-    saveStore(store, agentDir);
-  }
+  // A fresh store has no base yet: capture whatever settings.json holds right now.
+  if (ensureBase(store, currentSettings)) saveStore(store, agentDir);
 
+  const env: SwitchEnv = { pi, ctx, agentDir, packageRoot, store, settingsPath, currentSettings };
   const sub = tokens[0];
 
-  if (sub === "help") {
-    ctx.ui.notify(
-      [
-        "/switch                    current profile and profile list",
-        "/switch <profile>          apply a profile, then reload",
-        "/switch list               profile list",
-        "/switch show <profile>     resolved profile + diff, no change",
-        "/switch save <profile>     capture the current settings as a profile",
-        "/switch refresh            re-capture the base snapshot from settings.json",
-        "/switch restore            undo the last switch",
-        "/switch delete <profile>   remove a profile",
-        "/switch doctor             what this session actually has: model, tools, drift",
-      ].join("\n"),
-      "info",
+  if (sub === undefined || sub === "list") return handleList(env);
+  if (sub === "help") return handleHelp(env);
+  if (sub === "doctor") return handleDoctor(env);
+  if (sub === "refresh") return handleRefresh(env);
+  if (sub === "restore") return handleRestore(env);
+  if (sub === "save") return handleSave(env, tokens[1]);
+  if (sub === "delete") return handleDelete(env, tokens[1]);
+  if (sub === "show") return showProfile(store, tokens[1], currentSettings, agentDir, packageRoot, ctx);
+  return handleApply(env, sub);
+}
+
+function handleHelp(env: SwitchEnv): void {
+  env.ctx.ui.notify(
+    [
+      "/switch                    current profile and profile list",
+      "/switch <profile>          apply a profile, then reload",
+      "/switch list               profile list",
+      "/switch show <profile>     resolved profile + diff, no change",
+      "/switch save <profile>     capture the current settings as a profile",
+      "/switch refresh            re-capture the base snapshot from settings.json",
+      "/switch restore            undo the last switch",
+      "/switch delete <profile>   remove a profile",
+      "/switch doctor             what this session actually has: model, tools, drift",
+    ].join("\n"),
+    "info",
+  );
+}
+
+function handleList(env: SwitchEnv): void {
+  const { ctx, store, currentSettings } = env;
+  const lines = [
+    `active profile: ${store.activeProfile ?? "(none)"}`,
+    "",
+    ...profileNames(store).map((name) => {
+      const description = store.profiles[name]?.description;
+      return description ? `${name} - ${description}` : name;
+    }),
+    "",
+    "Current configuration:",
+    ...summarizeSettings(currentSettings),
+  ];
+  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot });
+  if (drift !== undefined) {
+    lines.push(
+      "",
+      `Settings differ from profile "${drift.profile}" (edited by hand, or the base is stale):`,
+      ...drift.changes.map((change) => `  ${change}`),
     );
+  }
+  showLong(ctx, lines);
+}
+
+function handleDoctor(env: SwitchEnv): void {
+  const { pi, ctx, store, currentSettings } = env;
+  const activeTools = pi.getActiveTools();
+  const configuredTools = pi.getAllTools();
+  const lines = [
+    `active profile: ${store.activeProfile ?? "(none)"}`,
+    `model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(none)"}`,
+    `thinking: ${ctx.thinkingLevel ?? "(unset)"}`,
+    "",
+    `active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`,
+    `configured tools (${configuredTools.length}): ${configuredTools.map((tool) => tool.name).join(", ") || "(none)"}`,
+  ];
+  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot });
+  if (drift !== undefined) {
+    lines.push("", `Settings differ from profile "${drift.profile}":`, ...drift.changes.map((change) => `  ${change}`));
+  } else if (store.activeProfile !== undefined) {
+    lines.push("", `Settings match profile "${store.activeProfile}".`);
+  }
+  showLong(ctx, lines);
+}
+
+function handleRefresh(env: SwitchEnv): void {
+  const { ctx, store, currentSettings } = env;
+  store.base = currentSettings;
+  if (store.activeProfile !== undefined) {
+    ctx.ui.notify(`/switch: base captured while profile "${store.activeProfile}" is active; switch back first for a clean base`, "warning");
+  }
+  saveStore(store, env.agentDir);
+  ctx.ui.notify("/switch refresh: base snapshot updated from settings.json", "info");
+}
+
+async function handleRestore(env: SwitchEnv): Promise<void> {
+  const { ctx, store, settingsPath, currentSettings } = env;
+  const snapshot = store.history[store.history.length - 1];
+  if (!snapshot) {
+    ctx.ui.notify("/switch restore: nothing to restore", "warning");
     return;
   }
+  store.history = store.history.slice(0, -1);
+  const changes = diffSettings(currentSettings, snapshot.settings);
+  writeManagedSettings(settingsPath, snapshot.settings);
+  store.activeProfile = snapshot.fromProfile ?? undefined;
+  saveStore(store, env.agentDir);
+  await reloadWithSummary(ctx, `restored ${snapshot.fromProfile ?? "previous configuration"}`, changes);
+}
 
-  if (sub === "doctor") {
-    const activeTools = pi.getActiveTools();
-    const configuredTools = pi.getAllTools();
-    const lines = [
-      `active profile: ${store.activeProfile ?? "(none)"}`,
-      `model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(none)"}`,
-      `thinking: ${ctx.thinkingLevel ?? "(unset)"}`,
-      "",
-      `active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`,
-      `configured tools (${configuredTools.length}): ${configuredTools.map((tool) => tool.name).join(", ") || "(none)"}`,
-    ];
-    const drift = detectDrift(store, currentSettings, { settingsBaseDir: agentDir, packageRoot });
-    if (drift !== undefined) {
-      lines.push("", `Settings differ from profile "${drift.profile}":`, ...drift.changes.map((change) => `  ${change}`));
-    } else if (store.activeProfile !== undefined) {
-      lines.push("", `Settings match profile "${store.activeProfile}".`);
-    }
-    showLong(ctx, lines);
+function handleSave(env: SwitchEnv, name: string | undefined): void {
+  const { ctx, store, currentSettings } = env;
+  if (!name) {
+    ctx.ui.notify("/switch save <profile>: missing profile name", "error");
     return;
   }
-
-  if (sub === undefined || sub === "list") {
-    const names = profileNames(store);
-    const lines = [
-      `active profile: ${store.activeProfile ?? "(none)"}`,
-      "",
-      ...names.map((name) => {
-        const description = store.profiles[name]?.description;
-        return description ? `${name} - ${description}` : name;
-      }),
-      "",
-      "Current configuration:",
-      ...summarizeSettings(currentSettings),
-    ];
-    const drift = detectDrift(store, currentSettings, { settingsBaseDir: agentDir, packageRoot });
-    if (drift !== undefined) {
-      lines.push(
-        "",
-        `Settings differ from profile "${drift.profile}" (edited by hand, or the base is stale):`,
-        ...drift.changes.map((change) => `  ${change}`),
-      );
-    }
-    showLong(ctx, lines);
+  const invalid = validateNewProfileName(name);
+  if (invalid !== undefined) {
+    ctx.ui.notify(`/switch save: ${invalid}`, "error");
     return;
   }
+  const overwriting = store.profiles[name] !== undefined;
+  store.profiles[name] = profileFromSettings(currentSettings);
+  saveStore(store, env.agentDir);
+  ctx.ui.notify(
+    overwriting
+      ? `/switch save: overwrote profile "${name}" with the current settings`
+      : `/switch save: saved profile "${name}" from the current settings`,
+    "info",
+  );
+}
 
-  if (sub === "refresh") {
-    store.base = currentSettings;
-    if (store.activeProfile) {
-      ctx.ui.notify(`/switch: base captured while profile "${store.activeProfile}" is active; switch back first for a clean base`, "warning");
-    }
-    saveStore(store, agentDir);
-    ctx.ui.notify("/switch refresh: base snapshot updated from settings.json", "info");
+export function profileFromSettings(currentSettings: ManagedSettings): Profile {
+  const enabledPackages = (currentSettings.packages ?? [])
+    .filter((entry) => !packageIsDisabled(entry))
+    .map(packageSourceString);
+  return {
+    description: `Saved ${new Date().toISOString()}`,
+    packages: enabledPackages,
+    extensions: currentSettings.extensions,
+    skills: currentSettings.skills,
+    prompts: currentSettings.prompts,
+    themes: currentSettings.themes,
+    theme: currentSettings.theme,
+    thinkingLevel: currentSettings.defaultThinkingLevel as Profile["thinkingLevel"],
+    tools: currentSettings.defaultTools,
+    model: modelSpecFromSettings(currentSettings),
+  };
+}
+
+function handleDelete(env: SwitchEnv, name: string | undefined): void {
+  const { ctx, store } = env;
+  if (!name) {
+    ctx.ui.notify("/switch delete <profile>: missing profile name", "error");
     return;
   }
-
-  if (sub === "restore") {
-    const snapshot = store.history[store.history.length - 1];
-    if (!snapshot) {
-      ctx.ui.notify("/switch restore: nothing to restore", "warning");
-      return;
-    }
-    store.history = store.history.slice(0, -1);
-    const changes = diffSettings(currentSettings, snapshot.settings);
-    writeManagedSettings(settingsPath, snapshot.settings);
-    store.activeProfile = snapshot.fromProfile ?? undefined;
-    saveStore(store, agentDir);
-    await reloadWithSummary(ctx, `restored ${snapshot.fromProfile ?? "previous configuration"}`, changes);
+  if (name === BASE_PROFILE_NAME) {
+    ctx.ui.notify("/switch delete: 'base' cannot be deleted", "error");
     return;
   }
-
-  if (sub === "save") {
-    const name = tokens[1];
-    if (!name) {
-      ctx.ui.notify("/switch save <profile>: missing profile name", "error");
-      return;
-    }
-    if (name === BASE_PROFILE_NAME) {
-      ctx.ui.notify("/switch save: 'base' is reserved (use /switch refresh)", "error");
-      return;
-    }
-    const invalid = validateNewProfileName(name);
-    if (invalid !== undefined) {
-      ctx.ui.notify(`/switch save: ${invalid}`, "error");
-      return;
-    }
-    const overwriting = store.profiles[name] !== undefined;
-    const enabledPackages = (currentSettings.packages ?? [])
-      .filter((entry) => !packageIsDisabled(entry))
-      .map(packageSourceString);
-    const profile: Profile = {
-      description: `Saved ${new Date().toISOString()}`,
-      packages: enabledPackages,
-      extensions: currentSettings.extensions,
-      skills: currentSettings.skills,
-      prompts: currentSettings.prompts,
-      themes: currentSettings.themes,
-      theme: currentSettings.theme,
-      thinkingLevel: currentSettings.defaultThinkingLevel as Profile["thinkingLevel"],
-      tools: currentSettings.defaultTools,
-      model: modelSpecFromSettings(currentSettings),
-    };
-    store.profiles[name] = profile;
-    saveStore(store, agentDir);
-    ctx.ui.notify(
-      overwriting
-        ? `/switch save: overwrote profile "${name}" with the current settings`
-        : `/switch save: saved profile "${name}" from the current settings`,
-      "info",
-    );
+  if (!store.profiles[name]) {
+    ctx.ui.notify(`/switch delete: unknown profile "${name}"`, "error");
     return;
   }
+  delete store.profiles[name];
+  // The active profile no longer exists; do not claim it in the footer.
+  if (store.activeProfile === name) store.activeProfile = undefined;
+  saveStore(store, env.agentDir);
+  ctx.ui.notify(`/switch delete: removed profile "${name}"`, "info");
+}
 
-  if (sub === "delete") {
-    const name = tokens[1];
-    if (!name) {
-      ctx.ui.notify("/switch delete <profile>: missing profile name", "error");
-      return;
-    }
-    if (name === BASE_PROFILE_NAME) {
-      ctx.ui.notify("/switch delete: 'base' cannot be deleted", "error");
-      return;
-    }
-    if (!store.profiles[name]) {
-      ctx.ui.notify(`/switch delete: unknown profile "${name}"`, "error");
-      return;
-    }
-    delete store.profiles[name];
-    if (store.activeProfile === name) store.activeProfile = undefined;
-    saveStore(store, agentDir);
-    ctx.ui.notify(`/switch delete: removed profile "${name}"`, "info");
-    return;
-  }
-
-  const name = sub;
-  if (name === "show") {
-    await showProfile(store, tokens[1], currentSettings, agentDir, packageRoot, ctx);
-    return;
-  }
-
+async function handleApply(env: SwitchEnv, name: string): Promise<void> {
+  const { ctx, store, settingsPath, currentSettings } = env;
   let resolved: { profile: Profile; chain: string[] };
   try {
     resolved = resolveProfile(name, store.profiles);
@@ -857,8 +871,8 @@ async function handleSwitch(
   }
 
   const nextSettings = buildProfileSettings(store.base, resolved.profile, {
-    settingsBaseDir: agentDir,
-    packageRoot,
+    settingsBaseDir: env.agentDir,
+    packageRoot: env.packageRoot,
   }, currentSettings.packages);
   const changes = diffSettings(currentSettings, nextSettings);
 
@@ -880,7 +894,7 @@ async function handleSwitch(
     settings: previous,
   }].slice(-MAX_HISTORY);
   store.activeProfile = name;
-  saveStore(store, agentDir);
+  saveStore(store, env.agentDir);
 
   await reloadWithSummary(ctx, `profile "${name}"`, changes);
 }

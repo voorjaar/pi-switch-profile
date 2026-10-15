@@ -21,8 +21,10 @@ import {
   type PackageSource,
   type Profile,
   packageIsDisabled,
+  packageSourceString,
   packageSourceMatches,
   parseModelSpec,
+  profileFromSettings,
   profileNames,
   resolveProfile,
   saveStore,
@@ -349,6 +351,43 @@ check("subcommand names cannot be profiles", ["list", "show", "save", "delete", 
 check("base is reserved for the snapshot", validateNewProfileName("base") !== undefined);
 check("ordinary names are usable", validateNewProfileName("my-setup") === undefined && validateNewProfileName("dev.2") === undefined && validateNewProfileName("coder_x") === undefined);
 check("path-like and empty names are rejected", validateNewProfileName("../evil") !== undefined && validateNewProfileName("") !== undefined && validateNewProfileName("-x") !== undefined);
+
+/* ---------------- corrupt store ---------------- */
+
+const corruptHome = tempDir();
+writeFileSync(join(corruptHome, "pi-switch-config.json"), "{ not json", "utf8");
+const corruptStore = loadStore(corruptHome, tempDir());
+check("a corrupt store falls back to seed profiles instead of throwing", corruptStore.profiles.base !== undefined && corruptStore.profiles.zen !== undefined, Object.keys(corruptStore.profiles));
+check("a corrupt store keeps no active profile or history", corruptStore.activeProfile === undefined && corruptStore.history.length === 0, corruptStore);
+
+/* ---------------- save round trip ---------------- */
+
+const saved = profileFromSettings({
+  packages: ["npm:pi-lens", { source: "npm:pi-off", autoload: false }, "npm:pi-switch-config"],
+  theme: "solarized",
+  defaultTools: ["read"],
+  defaultThinkingLevel: "high",
+  defaultProvider: "strata",
+  defaultModel: "qwen3.8-flash-next",
+});
+check(
+  "save records only enabled packages",
+  JSON.stringify(saved.packages) === JSON.stringify(["npm:pi-lens", "npm:pi-switch-config"]),
+  saved.packages,
+);
+check(
+  "save records theme, tools, and thinking level",
+  JSON.stringify({ theme: saved.theme, tools: saved.tools, thinkingLevel: saved.thinkingLevel }) === JSON.stringify({ theme: "solarized", tools: ["read"], thinkingLevel: "high" }),
+  saved,
+);
+check("save records the model as a profile spec", saved.model === "strata/qwen3.8-flash-next", saved.model);
+
+const savedApplied = buildProfileSettings(base, saved, driftOptions, base.packages);
+check(
+  "a saved profile re-enables exactly what was enabled when it was saved",
+  JSON.stringify((savedApplied.packages ?? []).filter((entry) => !packageIsDisabled(entry)).map(packageSourceString)) === JSON.stringify(["npm:pi-lens", "npm:pi-switch-config"]),
+  savedApplied.packages,
+);
 
 writeFileSync(join(projectDir, ".pi", "pi-switch-config.json"), JSON.stringify({ profiles: { projectOnly: { theme: "solarized" } } }), "utf8");
 const merged = loadStore(storeHome, projectDir);
