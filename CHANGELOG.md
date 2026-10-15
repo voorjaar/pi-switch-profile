@@ -19,6 +19,8 @@ All notable changes to pi-switch-config are documented here.
 - Added profile-name completion for `/switch` arguments.
 - Added self-preservation: the profile never disables this extension's own package entry, so a strict profile
   such as `zen` cannot switch `/switch` off.
+- Added a report of which profiles inherit from a profile deleted with `/switch delete`, and a warning that the
+  active profile's settings stay applied after deletion.
 - Added drift reporting: after a manual edit to `settings.json`, `/switch` and `/switch doctor` say the settings
   differ from the active profile instead of implying they match.
 - Added a warning when a profile lists tools that no package registered in this session.

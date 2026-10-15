@@ -25,6 +25,7 @@ import {
   packageSourceMatches,
   parseModelSpec,
   profileFromSettings,
+  profilesExtending,
   profileNames,
   resolveProfile,
   saveStore,
@@ -216,6 +217,13 @@ try {
   threw = error instanceof Error ? error.message : String(error);
 }
 check("extends cycle throws", threw.includes("cycle"), threw);
+
+check(
+  "deleting a parent names the profiles left broken",
+  JSON.stringify(profilesExtending(profiles, "parent")) === JSON.stringify(["child"]),
+  profilesExtending(profiles, "parent"),
+);
+check("a profile with nothing inheriting from it reports none", profilesExtending(profiles, "zen").length === 0);
 
 /* ---------------- settings build ---------------- */
 

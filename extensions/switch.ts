@@ -873,6 +873,13 @@ export function profileFromSettings(currentSettings: ManagedSettings): Profile {
   };
 }
 
+/** Profiles that inherit from `name`; deleting the parent leaves them broken. */
+export function profilesExtending(profiles: Record<string, Profile>, name: string): string[] {
+  return Object.keys(profiles)
+    .filter((profileName) => profiles[profileName]?.extends === name)
+    .sort();
+}
+
 function handleDelete(env: SwitchEnv, name: string | undefined): void {
   const { ctx, store } = env;
   if (!name) {
@@ -888,17 +895,19 @@ function handleDelete(env: SwitchEnv, name: string | undefined): void {
     return;
   }
   const wasActive = store.activeProfile === name;
+  const children = profilesExtending(store.profiles, name);
   delete store.profiles[name];
   // The active profile no longer exists; do not claim it in the footer.
   if (wasActive) store.activeProfile = undefined;
   saveStore(store, env.agentDir);
+  const inherited = children.length > 0 ? `; profiles extending it: ${children.join(", ")}` : "";
   if (wasActive) {
     // Deleting does not reload, so clear the footer that still names the removed profile.
     ctx.ui.setStatus("pi-switch-config", undefined);
-    ctx.ui.notify(`/switch delete: removed profile "${name}"; it was the active one, so its settings stay applied until you switch to another profile`, "warning");
+    ctx.ui.notify(`/switch delete: removed profile "${name}"${inherited}; it was the active one, so its settings stay applied until you switch to another profile`, "warning");
     return;
   }
-  ctx.ui.notify(`/switch delete: removed profile "${name}"`, "info");
+  ctx.ui.notify(`/switch delete: removed profile "${name}"${inherited}`, "info");
 }
 
 async function handleApply(env: SwitchEnv, name: string): Promise<void> {
