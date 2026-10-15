@@ -26,6 +26,11 @@ All notable changes to pi-switch-config are documented here.
 
 ### Fixed
 
+- Fixed profile switches being sticky: a managed key that neither the profile nor the base snapshot defines is
+  now removed from `settings.json` instead of keeping the value an earlier profile wrote. `/switch coder` now
+  really clears the tool list `/switch zen` set, and `/switch restore` is a complete undo.
+- Fixed an unparseable `settings.json` or profile store being overwritten without a copy: it is now saved as
+  `<file>.corrupt.bak` before the rewrite.
 - Fixed a first-run defect where an empty base snapshot made every profile write an empty package list.
 - Fixed package drift: packages installed after the base snapshot are now carried over, and packages removed
   with `pi remove` are no longer written back (pi reinstalls an `npm:` source while resolving it).

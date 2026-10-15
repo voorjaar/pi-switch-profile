@@ -15,7 +15,7 @@
  * without loading the pi runtime.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,6 +137,31 @@ function readJsonFile(path: string): Record<string, unknown> | undefined {
   }
 }
 
+/**
+ * A file we could not parse is about to be replaced. Keep the bytes: an unreadable
+ * settings.json is still the user's file, and rewriting it over would lose it.
+ */
+function preserveUnparseable(path: string): void {
+  if (!existsSync(path)) return;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+  try {
+    const parsed = JSON.parse(raw.replace(/^﻿/, ""));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return;
+  } catch {
+    // Not JSON: keep a copy before the write below replaces it.
+  }
+  try {
+    copyFileSync(path, `${path}.corrupt.bak`);
+  } catch {
+    // A failed backup must not block the write.
+  }
+}
+
 /** Atomic write: tmp file in the same directory, then rename. */
 function writeJsonFile(path: string, value: unknown): void {
   const dir = dirname(path);
@@ -184,6 +209,7 @@ export function captureManagedSettings(settingsFile: Record<string, unknown> | u
  * Returns the managed values that were in the file before the write.
  */
 export function writeManagedSettings(settingsPath: string, managed: ManagedSettings): ManagedSettings {
+  preserveUnparseable(settingsPath);
   const current = readJsonFile(settingsPath) ?? {};
   const previous = captureManagedSettings(current);
   const next: Record<string, unknown> = { ...current };
@@ -515,6 +541,7 @@ export function loadStore(agentDir: string, cwd: string): Store {
 
 export function saveStore(store: Store, agentDir: string): void {
   const path = join(agentDir, STORE_FILE_NAME);
+  preserveUnparseable(path);
   const existing = readJsonFile(path) ?? {};
   const next: Record<string, unknown> = {
     ...existing,

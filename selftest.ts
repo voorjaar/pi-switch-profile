@@ -3,7 +3,7 @@
  * Run with: npm test  (node --experimental-strip-types selftest.ts)
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -379,6 +379,31 @@ writeFileSync(join(corruptHome, "pi-switch-config.json"), "{ not json", "utf8");
 const corruptStore = loadStore(corruptHome, tempDir());
 check("a corrupt store falls back to seed profiles instead of throwing", corruptStore.profiles.base !== undefined && corruptStore.profiles.zen !== undefined, Object.keys(corruptStore.profiles));
 check("a corrupt store keeps no active profile or history", corruptStore.activeProfile === undefined && corruptStore.history.length === 0, corruptStore);
+
+/* ---------------- unparseable files are kept, not overwritten ---------------- */
+
+const corruptDir = tempDir();
+const corruptSettingsPath = join(corruptDir, "settings.json");
+writeFileSync(corruptSettingsPath, "{ oops", "utf8");
+writeManagedSettings(corruptSettingsPath, { theme: "system" });
+const rewrittenCorrupt = readJson(corruptSettingsPath);
+check(
+  "an unparseable settings.json is copied aside before being rewritten",
+  readFileSync(`${corruptSettingsPath}.corrupt.bak`, "utf8") === "{ oops" && rewrittenCorrupt.theme === "system",
+  rewrittenCorrupt,
+);
+
+const corruptStoreHome = tempDir();
+const corruptStoreFile = join(corruptStoreHome, "pi-switch-config.json");
+writeFileSync(corruptStoreFile, JSON.stringify(["not", "an", "object"]), "utf8");
+saveStore(loadStore(corruptStoreHome, tempDir()), corruptStoreHome);
+check("an array-shaped store is copied aside too", readFileSync(`${corruptStoreFile}.corrupt.bak`, "utf8").includes("not") === true);
+
+const goodHome = tempDir();
+const goodSettings = join(goodHome, "settings.json");
+writeFileSync(goodSettings, JSON.stringify({ theme: "ok" }), "utf8");
+writeManagedSettings(goodSettings, { theme: "system" });
+check("a parseable file is never copied aside", existsSync(`${goodSettings}.corrupt.bak`) === false);
 
 /* ---------------- save round trip ---------------- */
 
