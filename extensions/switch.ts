@@ -435,6 +435,24 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
+export function detectDrift(
+  store: Store,
+  currentSettings: ManagedSettings,
+  options: { settingsBaseDir: string; packageRoot: string },
+): { profile: string; changes: string[] } | undefined {
+  if (store.activeProfile === undefined) return undefined;
+  let resolved: { profile: Profile; chain: string[] };
+  try {
+    resolved = resolveProfile(store.activeProfile, store.profiles);
+  } catch {
+    return undefined;
+  }
+  const expected = buildProfileSettings(store.base, resolved.profile, options, currentSettings.packages);
+  const changes = diffSettings(currentSettings, expected);
+  if (changes.length === 0) return undefined;
+  return { profile: store.activeProfile, changes };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Store                                                                       */
 /* -------------------------------------------------------------------------- */
@@ -547,7 +565,7 @@ export default function (pi: ExtensionAPI): void {
     },
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {
-        await handleSwitch(args, ctx, agentDir, packageRoot);
+        await handleSwitch(pi, args, ctx, agentDir, packageRoot);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`/switch: ${message}`, "error");
@@ -638,6 +656,7 @@ async function showProfile(
 }
 
 async function handleSwitch(
+  pi: ExtensionAPI,
   args: string,
   ctx: ExtensionCommandContext,
   agentDir: string,
@@ -665,9 +684,31 @@ async function handleSwitch(
         "/switch refresh            re-capture the base snapshot from settings.json",
         "/switch restore            undo the last switch",
         "/switch delete <profile>   remove a profile",
+        "/switch doctor             what this session actually has: model, tools, drift",
       ].join("\n"),
       "info",
     );
+    return;
+  }
+
+  if (sub === "doctor") {
+    const activeTools = pi.getActiveTools();
+    const configuredTools = pi.getAllTools();
+    const lines = [
+      `active profile: ${store.activeProfile ?? "(none)"}`,
+      `model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(none)"}`,
+      `thinking: ${ctx.thinkingLevel ?? "(unset)"}`,
+      "",
+      `active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`,
+      `configured tools (${configuredTools.length}): ${configuredTools.map((tool) => tool.name).join(", ") || "(none)"}`,
+    ];
+    const drift = detectDrift(store, currentSettings, { settingsBaseDir: agentDir, packageRoot });
+    if (drift !== undefined) {
+      lines.push("", `Settings differ from profile "${drift.profile}":`, ...drift.changes.map((change) => `  ${change}`));
+    } else if (store.activeProfile !== undefined) {
+      lines.push("", `Settings match profile "${store.activeProfile}".`);
+    }
+    showLong(ctx, lines);
     return;
   }
 
@@ -684,6 +725,14 @@ async function handleSwitch(
       "Current configuration:",
       ...summarizeSettings(currentSettings),
     ];
+    const drift = detectDrift(store, currentSettings, { settingsBaseDir: agentDir, packageRoot });
+    if (drift !== undefined) {
+      lines.push(
+        "",
+        `Settings differ from profile "${drift.profile}" (edited by hand, or the base is stale):`,
+        ...drift.changes.map((change) => `  ${change}`),
+      );
+    }
     showLong(ctx, lines);
     return;
   }

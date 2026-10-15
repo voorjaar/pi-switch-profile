@@ -13,7 +13,7 @@
 - **不会把自己锁死。** 即使是最严格的配置档，也会保留扩展自身所在的包。
 - **可撤销。** 每次切换都会记录被替换的设置，`/switch restore` 原样恢复。
 - **内置配置档。** 首次使用时自动创建 `zen`（零技能、零扩展）和 `coder`（基线快照的全部内容）。
-- **状态可见。** 底栏显示当前生效的配置档，`/switch` 会打印解析后的配置与逐项变更。
+- **状态可见。** 底栏显示当前生效的配置档，`/switch` 会打印解析后的配置与逐项变更。如果你之后手动改过 `settings.json`，`/switch` 与 `/switch doctor` 会直接指出这一点，而不是假装配置档仍然生效。
 - **自动补全。** 输入 `/switch ` 后按 Tab 会列出配置档名称。
 
 ## 安装
@@ -44,6 +44,7 @@ pi -e ./extensions/switch.ts
 | `/switch refresh` | 从 `settings.json` 重新捕获基线快照（手动安装某个包之后建议执行） |
 | `/switch restore` | 撤销上一次切换 |
 | `/switch delete <profile>` | 删除一个配置档 |
+| `/switch doctor` | 显示当前会话真实状态：模型、思考等级、激活与已配置的工具，以及设置是否与当前配置档一致 |
 | `/switch help` | 列出全部子命令 |
 
 配置档名称也是命令参数，输入 `/switch ` 后按 Tab 即可补全。
@@ -102,7 +103,16 @@ pi -e ./extensions/switch.ts
 `base` 是每个配置档叠加其上的 `settings.json` 快照。请在没有配置档生效时捕获它：
 
 - `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。
-- `/switch refresh` 重新读取 `settings.json` 并更新 `base`。在你用 `pi install`、`pi remove` 或 `pi config` 安装或移除某个包之后请执行一次，否则配置档会反复套用旧的包列表。
+- `/switch refresh` 重新读取 `settings.json` 并更新 `base`。当你希望“启用状态”的快照跟随 `pi config` 的当前结果时执行一次。
+
+### 包是这么决定的
+
+包的集合取自当前的 `settings.json`，配置档只决定其中哪些处于启用状态：
+
+- 基线快照之后安装的包会被带过来，所以 `/switch coder` 会启用它，`/switch zen` 会关掉它。
+- 用 `pi remove` 移除的包会被丢弃，切换不会把它写回去（否则 pi 在解析 `npm:` 来源时会重新安装它）。
+- 既没有 `packages` 也没有 `disablePackages` 的配置档会启用所有已知的包。`packages` 是白名单，`disablePackages` 是黑名单，两者都支持部分匹配，例如 `pi-lens` 或 `npm:pi-lens`。
+- 本扩展始终把自己保持在启用状态。如果配置档能把自己关掉，就只能靠手动改 `settings.json` 才能回来了。
 
 ### 作用范围
 
@@ -112,10 +122,10 @@ pi -e ./extensions/switch.ts
 
 ```bash
 npm test                     # 纯逻辑自检（配置档解析、包策略、设置写入）
-node scripts/live-test.mjs   # 实跑冒烟测试：真实 pi 的 RPC 模式，/switch zen 与 /switch restore
+node scripts/live-test.mjs   # 实跑冒烟测试：真实 pi 的 RPC 模式，/switch zen、reload 后的工具、/switch restore
 ```
 
-`scripts/live-test.mjs` 会备份 `~/.pi/agent/settings.json`，切到 `zen`，检查文件内容，恢复设置，最后把原始配置写回。
+`scripts/live-test.mjs` 会把本包安装进已备份的 `~/.pi/agent/settings.json`，启动真实 pi（RPC 模式），切到 `zen`，检查文件与 reload 后的会话（注册的命令、激活的工具、被禁用包的工具是否消失），恢复之前的设置，最后把原始配置写回。
 
 ## 许可证
 

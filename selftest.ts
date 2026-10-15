@@ -12,6 +12,7 @@ import {
   buildProfileSettings,
   captureManagedSettings,
   diffSettings,
+  detectDrift,
   ensureBase,
   isSelfPackageSource,
   mergePackageSets,
@@ -304,8 +305,10 @@ check("zen seeded", emptyStore.profiles.zen !== undefined);
 
 check("ensureBase captures settings on a fresh store", ensureBase(emptyStore, base) === true && JSON.stringify(emptyStore.base) === JSON.stringify(base), emptyStore.base);
 check("ensureBase keeps an existing base", ensureBase(emptyStore, { theme: "other" }) === false && emptyStore.base.theme === base.theme, emptyStore.base);
+saveStore(emptyStore, storeHome);
 
 const store = loadStore(storeHome, projectDir);
+check("a captured base survives a reload", JSON.stringify(store.base) === JSON.stringify(base), store.base);
 store.activeProfile = "zen";
 store.history = [{ at: new Date().toISOString(), fromProfile: null, toProfile: "zen", settings: base }];
 saveStore(store, storeHome);
@@ -314,6 +317,30 @@ const reloaded = loadStore(storeHome, projectDir);
 eq("store round-trips active profile", reloaded.activeProfile, "zen");
 eq("store round-trips history", reloaded.history.length, 1);
 eq("profile names sorted with base first", profileNames(reloaded)[0], "base");
+
+/* ---------------- drift detection ---------------- */
+
+const driftOptions = { settingsBaseDir: agentDir, packageRoot };
+const zenResolved = resolveProfile("zen", reloaded.profiles).profile;
+const matching = buildProfileSettings(base, zenResolved, driftOptions, base.packages);
+check(
+  "no drift when settings match the active profile",
+  detectDrift(reloaded, matching, driftOptions) === undefined,
+  detectDrift(reloaded, matching, driftOptions),
+);
+
+const handEdited: ManagedSettings = { ...matching, theme: "solarized" };
+const drift = detectDrift(reloaded, handEdited, driftOptions);
+check(
+  "drift reported after a hand edit",
+  drift !== undefined && drift.profile === "zen" && drift.changes.some((change) => change.includes("theme")),
+  drift,
+);
+
+check(
+  "no drift check without an active profile",
+  detectDrift({ ...reloaded, activeProfile: undefined }, handEdited, driftOptions) === undefined,
+);
 
 writeFileSync(join(projectDir, ".pi", "pi-switch-config.json"), JSON.stringify({ profiles: { projectOnly: { theme: "solarized" } } }), "utf8");
 const merged = loadStore(storeHome, projectDir);

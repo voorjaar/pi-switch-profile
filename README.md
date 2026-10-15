@@ -13,7 +13,7 @@ Use it to move between a stripped-down session and a fully equipped one without 
 - **Never locks itself out.** The extension keeps its own package enabled even in the strictest profile.
 - **Undo.** Every switch records the settings it replaced; `/switch restore` puts them back.
 - **Seeded profiles.** `zen` (zero skills, zero extensions) and `coder` (everything from the base snapshot) are created on first use.
-- **Visible state.** The footer shows the active profile, and `/switch` prints the resolved configuration and the exact changes.
+- **Visible state.** The footer shows the active profile, and `/switch` prints the resolved configuration and the exact changes. If you edit `settings.json` by hand afterwards, `/switch` and `/switch doctor` say so instead of pretending the profile is applied.
 - **Autocomplete.** Profile names complete as command arguments.
 
 ## Installation
@@ -44,6 +44,7 @@ If you edit `settings.json` by hand, run `/reload` afterwards.
 | `/switch refresh` | Re-capture the base snapshot from `settings.json` (do this after installing a package by hand) |
 | `/switch restore` | Undo the last switch |
 | `/switch delete <profile>` | Remove a profile |
+| `/switch doctor` | Show what the live session actually has: model, thinking level, active and configured tools, and whether settings match the active profile |
 | `/switch help` | List the subcommands |
 
 Profiles are also slash-command arguments: type `/switch` with a trailing space and press Tab to list them.
@@ -102,7 +103,16 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 `base` is the snapshot of `settings.json` that every profile overlays. Capture it while no profile is active:
 
 - `/switch save my-setup` records the current configuration as a profile you can return to.
-- `/switch refresh` re-reads `settings.json` into `base`. Run it after you install or remove a package with `pi install`, `pi remove`, or `pi config`, otherwise a profile keeps re-applying the older package list.
+- `/switch refresh` re-reads `settings.json` into `base`. Run it when you want the *enablement* snapshot to follow what `pi config` currently says.
+
+### How packages are decided
+
+The set of packages is taken from live `settings.json`; a profile only decides which of them are enabled:
+
+- A package you installed after the base snapshot is carried over, so `/switch coder` enables it and `/switch zen` turns it off.
+- A package you removed with `pi remove` is dropped, so switching never writes it back (pi would reinstall an `npm:` source during resolve).
+- A profile with neither `packages` nor `disablePackages` enables every known package. `packages` is a whitelist, `disablePackages` a blacklist; both accept partial matches such as `pi-lens` or `npm:pi-lens`.
+- This extension always keeps itself enabled. If a profile could switch itself off, there would be no way back except editing `settings.json`.
 
 ### Scope
 
@@ -112,10 +122,10 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 
 ```bash
 npm test                     # pure-logic self-test (profile resolution, package policy, settings writes)
-node scripts/live-test.mjs   # live smoke test: real pi in RPC mode, /switch zen, /switch restore
+node scripts/live-test.mjs   # live smoke test: real pi in RPC mode, /switch zen, tools after reload, /switch restore
 ```
 
-`scripts/live-test.mjs` backs up `~/.pi/agent/settings.json`, switches to `zen`, checks the file, restores it, and puts the original settings back.
+`scripts/live-test.mjs` installs this package into a backed-up `~/.pi/agent/settings.json`, runs a real pi in RPC mode, switches to `zen`, checks the file and the reloaded session (registered commands, active tools, tools from disabled packages), restores the previous settings, and finally puts the original settings back.
 
 ## License
 

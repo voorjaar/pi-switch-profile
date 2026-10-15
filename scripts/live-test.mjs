@@ -162,6 +162,28 @@ async function main() {
     await runSlash("/switch show coder");
     check("/switch show works after reload", lastNotification((text) => text.includes("Resolved configuration")) !== undefined, notifications.slice(-2).join(" | "));
 
+    const listText = lastNotification((text) => text.includes("active profile")) ?? "";
+    check("no false drift warning after switching a profile", !listText.includes("Settings differ from profile"), listText.slice(-300));
+
+    // doctor reports what the reloaded session really has: the profile's tools, and
+    // none of the tools from packages the profile disabled.
+    await runSlash("/switch doctor");
+    await waitFor(() => lastNotification((text) => text.includes("active tools")) !== undefined, 60_000, "doctor report");
+    const doctorText = lastNotification((text) => text.includes("active tools")) ?? "";
+    const activeMatch = doctorText.match(/active tools \((\d+)\):([^\n]*)/);
+    const activeTools = activeMatch ? activeMatch[2].split(",").map((name) => name.trim()).filter(Boolean) : [];
+    check(
+      "zen tool profile is active in the reloaded session",
+      activeTools.length === 4 && ["read", "bash", "edit", "write"].every((name) => activeTools.includes(name)),
+      doctorText.split("\n").filter((line) => line.includes("tools")).join(" | "),
+    );
+    check(
+      "tools from disabled packages are gone",
+      !/ast_grep_search|ast_grep_replace|browser_navigate|lens_diagnostic_mark/.test(doctorText),
+      doctorText.match(/configured tools[^\n]*/)?.[0] ?? doctorText,
+    );
+    check("doctor confirms settings match the active profile", doctorText.includes('Settings match profile "zen"'), doctorText.slice(-200));
+
     await runSlash("/switch restore");
     await waitFor(
       () => lastNotification((text) => text.includes("restored")) !== undefined,
