@@ -1,0 +1,22 @@
+{
+  "name": "pi-switch-config",
+  "version": "0.1.0",
+  "description": "Switch pi configuration profiles (packages, extensions, skills, themes, model) with /switch and reload",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions/switch.ts"]
+  },
+  "files": [
+    "extensions/",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types selftest.ts"
+  }
+}
