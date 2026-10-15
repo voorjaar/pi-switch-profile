@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,12 +44,18 @@ function readSettings() {
 }
 
 async function main() {
+  if (!existsSync(extensionPath)) throw new Error(`missing extension entry: ${extensionPath}`);
   if (!existsSync(settingsPath)) throw new Error(`no settings.json at ${settingsPath}`);
   copyFileSync(settingsPath, backupPath);
   const before = readSettings();
-  log(`backed up settings.json (${(before.packages ?? []).length} packages)`);
+  // Install this package the way a user would, so the run exercises the real
+  // path: the extension is loaded from settings.packages, and "zen" has to keep
+  // that entry enabled or /switch would disappear after the reload.
+  const installed = { ...before, packages: [...(before.packages ?? []), repoRoot] };
+  writeFileSync(settingsPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
+  log(`backed up settings.json and installed ${repoRoot} (${installed.packages.length} packages)`);
 
-  const child = spawn("pi", ["--mode", "rpc", "-e", extensionPath], {
+  const child = spawn("pi", ["--mode", "rpc"], {
     cwd: repoRoot,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -125,7 +131,7 @@ async function main() {
     check("/switch list notified", lastNotification((text) => text.includes("active profile")) !== undefined);
 
     await runSlash("/switch show zen");
-    check("/switch show zen notified", lastNotification((text) => text.includes("Resolved configuration")) !== undefined);
+    check("/switch show zen notified", lastNotification((text) => text.includes("Resolved configuration")) !== undefined, notifications.slice(-2).join(" | "));
 
     await runSlash("/switch zen");
     const applied = await waitFor(
@@ -133,24 +139,28 @@ async function main() {
       120_000,
       "switch zen summary notification",
     );
-    check("/switch zen reported changes", applied);
+    check("/switch zen reported changes", applied, notifications.slice(-2).join(" | "));
 
     const after = readSettings();
+    const total = (installed.packages ?? []).length;
     const enabled = (after.packages ?? []).filter((entry) => typeof entry === "string");
     const disabled = (after.packages ?? []).filter((entry) => entry && entry.autoload === false);
-    check("zen disabled the other packages", disabled.length === (before.packages ?? []).length - enabled.length, `${enabled.length} enabled / ${disabled.length} disabled`);
+    check("zen disabled the other packages", enabled.length + disabled.length === total && disabled.length > 0, `${enabled.length} enabled / ${disabled.length} disabled of ${total}`);
     check("zen kept pi-switch-config enabled", enabled.some((entry) => String(entry).includes("pi-switch-config")), enabled.join(", "));
     check("zen set theme system", after.theme === "system", after.theme);
     check("zen kept unmanaged settings", after.compaction !== undefined && after.defaultModel === before.defaultModel);
     check("zen set defaultTools", JSON.stringify(after.defaultTools) === JSON.stringify(["read", "bash", "edit", "write"]), JSON.stringify(after.defaultTools));
 
-    // The reload must have reloaded the extension runtime and re-applied the profile.
-    const reloaded = await waitFor(
-      () => lastNotification((text) => text.includes("applied") || text.includes("profile:")) !== undefined || true,
-      15_000,
-      "reload",
-    );
-    check("reload completed", reloaded);
+    // The reload replaces the extension runtime: /switch must still be registered.
+    const commandsAfter = await send({ type: "get_commands" }, 120_000);
+    const namesAfter = (commandsAfter.data?.commands ?? []).map((command) => command.name);
+    check("/switch survived the zen reload", namesAfter.includes("switch"), `${namesAfter.length} commands`);
+
+    await runSlash("/switch list");
+    check("/switch list works after reload", lastNotification((text) => text.includes("active profile")) !== undefined, notifications.slice(-2).join(" | "));
+
+    await runSlash("/switch show coder");
+    check("/switch show works after reload", lastNotification((text) => text.includes("Resolved configuration")) !== undefined, notifications.slice(-2).join(" | "));
 
     await runSlash("/switch restore");
     await waitFor(
@@ -159,7 +169,7 @@ async function main() {
       "restore summary notification",
     );
     const restored = readSettings();
-    check("restore put packages back", JSON.stringify(restored.packages) === JSON.stringify(before.packages));
+    check("restore put packages back", JSON.stringify(restored.packages) === JSON.stringify(installed.packages));
     check("restore put theme back", restored.theme === before.theme, restored.theme);
   } finally {
     child.stdin.end();

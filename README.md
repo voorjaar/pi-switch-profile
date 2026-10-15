@@ -46,7 +46,7 @@ If you edit `settings.json` by hand, run `/reload` afterwards.
 | `/switch delete <profile>` | Remove a profile |
 | `/switch help` | List the subcommands |
 
-Profiles are also slash-command arguments, so typing `/switch ` and pressing Tab lists them.
+Profiles are also slash-command arguments: type `/switch` with a trailing space and press Tab to list them.
 
 ## Profiles
 

@@ -23,4 +23,4 @@ extension is to write the file and reload. There is no `setDefaultTools` setter 
 (`$schema`, `compaction`, …), and do the read+write inside one synchronous block so no queued pi write can
 interleave. Write to a tmp file in the same directory and `rename()` it. Then `await ctx.reload()`.
 
-**Related** [[pi-reload-drops-stale-extension-ui-calls]], [[pi-package-autoload-disable]]
+**Related** [[pi-reload-drops-stale-extension-ui-calls]], [[pi-package-autoload-disable]], [[pi-profile-package-drift]]

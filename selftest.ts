@@ -12,7 +12,9 @@ import {
   buildProfileSettings,
   captureManagedSettings,
   diffSettings,
+  ensureBase,
   isSelfPackageSource,
+  mergePackageSets,
   loadStore,
   type ManagedSettings,
   type PackageSource,
@@ -115,7 +117,51 @@ check(
   policy({ packages: [] }, basePackages),
 );
 
-eq("no package policy keeps base untouched", policy({}, basePackages), basePackages);
+eq("no package policy enables every known package", policy({}, basePackages), basePackages);
+
+eq(
+  "no package policy re-enables entries disabled by an earlier profile",
+  policy({}, ["npm:pi-lens", { source: "npm:pi-web-access", autoload: false }]),
+  ["npm:pi-lens", "npm:pi-web-access"],
+);
+
+check(
+  "enabling keeps a user resource filter",
+  JSON.stringify(policy({}, [{ source: "npm:pi-lens", skills: ["skills/*"], autoload: false }])) === JSON.stringify([{ source: "npm:pi-lens", skills: ["skills/*"] }]),
+  policy({}, [{ source: "npm:pi-lens", skills: ["skills/*"], autoload: false }]),
+);
+
+/* ---------------- package set merging ---------------- */
+
+eq(
+  "packages installed after the base snapshot are carried over",
+  mergePackageSets(["npm:pi-lens"], ["npm:pi-lens", "npm:pi-newcomer"]),
+  ["npm:pi-lens", "npm:pi-newcomer"],
+);
+
+eq(
+  "packages removed from settings are dropped",
+  mergePackageSets(["npm:pi-lens", "npm:pi-gone"], ["npm:pi-lens"]),
+  ["npm:pi-lens"],
+);
+
+check(
+  "a settings filter wins over the base form",
+  JSON.stringify(mergePackageSets(["npm:pi-lens"], [{ source: "npm:pi-lens", skills: ["skills/*"] }])) === JSON.stringify([{ source: "npm:pi-lens", skills: ["skills/*"] }]),
+  mergePackageSets(["npm:pi-lens"], [{ source: "npm:pi-lens", skills: ["skills/*"] }]),
+);
+
+check(
+  "a base filter wins when settings only has the bare source",
+  JSON.stringify(mergePackageSets([{ source: "npm:pi-lens", skills: ["skills/*"] }], ["npm:pi-lens"])) === JSON.stringify([{ source: "npm:pi-lens", skills: ["skills/*"] }]),
+  mergePackageSets([{ source: "npm:pi-lens", skills: ["skills/*"] }], ["npm:pi-lens"]),
+);
+
+check(
+  "merging does not duplicate an entry present in both",
+  mergePackageSets(["npm:pi-lens", "npm:pi-lens"], ["npm:pi-lens"]).length === 1,
+  mergePackageSets(["npm:pi-lens", "npm:pi-lens"], ["npm:pi-lens"]),
+);
 
 const filtered = policy({ disablePackages: ["pi-lens"] }, [{ source: "npm:pi-lens", skills: ["skills/*"] }]);
 const firstEntry = filtered[0];
@@ -179,7 +225,7 @@ const base: ManagedSettings = {
   defaultThinkingLevel: "medium",
 };
 
-const zenSettings = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot });
+const zenSettings = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, base.packages);
 check("zen keeps self enabled", (zenSettings.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, "pi-switch-config")));
 eq("zen theme", zenSettings.theme, "system");
 eq("zen thinking", zenSettings.defaultThinkingLevel, "low");
@@ -187,14 +233,25 @@ eq("zen tools", zenSettings.defaultTools, ["read", "bash", "edit", "write"]);
 eq("zen keeps base model", { provider: zenSettings.defaultProvider, model: zenSettings.defaultModel }, { provider: "strata", model: "qwen3.8-flash-next" });
 check("zen clears prompts", zenSettings.prompts?.includes("!prompts/**") === true, zenSettings.prompts);
 
-const modelProfile = buildProfileSettings(base, { model: "anthropic/claude-sonnet-4-5" }, { settingsBaseDir: agentDir, packageRoot });
+const modelProfile = buildProfileSettings(base, { model: "anthropic/claude-sonnet-4-5" }, { settingsBaseDir: agentDir, packageRoot }, base.packages);
 eq("profile model overrides provider and model", { provider: modelProfile.defaultProvider, model: modelProfile.defaultModel }, {
   provider: "anthropic",
   model: "claude-sonnet-4-5",
 });
 
-const noop = buildProfileSettings(base, {}, { settingsBaseDir: agentDir, packageRoot });
+const noop = buildProfileSettings(base, {}, { settingsBaseDir: agentDir, packageRoot }, base.packages);
 eq("empty profile equals base", [noop.packages, noop.extensions, noop.skills, noop.prompts, noop.themes, noop.theme, noop.defaultProvider, noop.defaultModel, noop.defaultThinkingLevel, noop.defaultTools], [base.packages, base.extensions, base.skills, base.prompts, base.themes, base.theme, base.defaultProvider, base.defaultModel, base.defaultThinkingLevel, base.defaultTools]);
+
+/* ---------------- newly installed and removed packages ---------------- */
+
+const driftedCurrent: PackageSource[] = ["npm:pi-lens", "npm:pi-brand-new", "npm:pi-switch-config"];
+const zenDrifted = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, driftedCurrent);
+check("zen disables a package installed after the snapshot", (zenDrifted.packages ?? []).some((entry) => packageIsDisabled(entry) && packageSourceMatches(entry, "pi-brand-new")), zenDrifted.packages);
+check("zen still keeps itself enabled", (zenDrifted.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, "pi-switch-config")), zenDrifted.packages);
+
+const coderDrifted = buildProfileSettings(base, resolveProfile("coder", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, driftedCurrent);
+check("coder re-enables everything currently known", (coderDrifted.packages ?? []).every((entry) => !packageIsDisabled(entry)), coderDrifted.packages);
+check("coder does not resurrect a removed package", (coderDrifted.packages ?? []).some((entry) => packageSourceMatches(entry, "pi-web-access")) === false, coderDrifted.packages);
 
 /* ---------------- diff + summary ---------------- */
 
@@ -244,6 +301,9 @@ mkdirSync(join(projectDir, ".pi"), { recursive: true });
 const emptyStore = loadStore(storeHome, projectDir);
 check("base profile always exists", emptyStore.profiles.base !== undefined);
 check("zen seeded", emptyStore.profiles.zen !== undefined);
+
+check("ensureBase captures settings on a fresh store", ensureBase(emptyStore, base) === true && JSON.stringify(emptyStore.base) === JSON.stringify(base), emptyStore.base);
+check("ensureBase keeps an existing base", ensureBase(emptyStore, { theme: "other" }) === false && emptyStore.base.theme === base.theme, emptyStore.base);
 
 const store = loadStore(storeHome, projectDir);
 store.activeProfile = "zen";

@@ -229,30 +229,86 @@ export function isSelfPackageSource(entry: PackageSource, settingsBaseDir: strin
   return resolved === packageRoot || resolved.startsWith(`${packageRoot}/`);
 }
 
+/**
+ * The known package set follows settings.json; a profile only decides which of
+ * them are enabled.
+ *
+ * - An entry in base that is no longer in settings counts as removed and is dropped,
+ *   so `pi remove` is not undone by the next switch.
+ * - An entry in settings that base never saw (installed after the base snapshot) is
+ *   carried over so profiles can enable or disable it too.
+ * - A user-authored resource filter in settings is kept over the base form.
+ */
+export function mergePackageSets(
+  base: PackageSource[] | undefined,
+  current: PackageSource[] | undefined,
+): PackageSource[] {
+  const baseEntries = base ?? [];
+  const currentEntries = current ?? [];
+  const currentBySource = new Map<string, PackageSource>();
+  for (const entry of currentEntries) currentBySource.set(packageSourceString(entry), entry);
+
+  const merged: PackageSource[] = [];
+  const seen = new Set<string>();
+  for (const entry of baseEntries) {
+    const source = packageSourceString(entry);
+    if (seen.has(source)) continue;
+    const currentEntry = currentBySource.get(source);
+    if (currentEntry === undefined) continue;
+    merged.push(hasResourceFilter(currentEntry) ? currentEntry : entry);
+    seen.add(source);
+  }
+  for (const entry of currentEntries) {
+    const source = packageSourceString(entry);
+    if (seen.has(source)) continue;
+    merged.push(entry);
+    seen.add(source);
+  }
+  return merged;
+}
+
+function hasResourceFilter(entry: PackageSource): boolean {
+  if (typeof entry !== "object") return false;
+  return entry.extensions !== undefined || entry.skills !== undefined || entry.prompts !== undefined || entry.themes !== undefined;
+}
+
+/** Drop `autoload: false` so the profile policy alone decides enablement. */
+function enabledForm(entry: PackageSource): PackageSource {
+  if (typeof entry === "string") return entry;
+  const filter: PackageFilter = {
+    source: entry.source,
+    ...(entry.extensions !== undefined ? { extensions: entry.extensions } : undefined),
+    ...(entry.skills !== undefined ? { skills: entry.skills } : undefined),
+    ...(entry.prompts !== undefined ? { prompts: entry.prompts } : undefined),
+    ...(entry.themes !== undefined ? { themes: entry.themes } : undefined),
+  };
+  return filter.extensions === undefined && filter.skills === undefined && filter.prompts === undefined && filter.themes === undefined
+    ? entry.source
+    : filter;
+}
+
 export function applyPackagePolicy(
-  basePackages: PackageSource[] | undefined,
+  templates: PackageSource[],
   profile: Profile,
   options: { settingsBaseDir: string; packageRoot: string },
-): PackageSource[] | undefined {
-  const list = (basePackages ?? []).map((entry) => entry);
-  if (profile.packages === undefined && profile.disablePackages === undefined) return basePackages;
-
+): PackageSource[] {
   const keep = profile.packages;
   const drop = profile.disablePackages ?? [];
+  const hasPolicy = keep !== undefined || drop.length > 0;
 
-  return list.map((entry) => {
-    if (isSelfPackageSource(entry, options.settingsBaseDir, options.packageRoot)) return entry;
-    if (keep !== undefined && !keep.some((pattern) => packageSourceMatches(entry, pattern))) {
-      return { source: packageSourceString(entry), autoload: false };
-    }
-    if (drop.some((pattern) => packageSourceMatches(entry, pattern))) {
-      return { source: packageSourceString(entry), autoload: false };
-    }
-    return entry;
+  return templates.map((entry) => {
+    // This extension must survive even the strictest profile, or there is no way back.
+    if (isSelfPackageSource(entry, options.settingsBaseDir, options.packageRoot)) return enabledForm(entry);
+    if (hasPolicy === false) return enabledForm(entry);
+    const whitelisted = keep === undefined || keep.some((pattern) => packageSourceMatches(entry, pattern));
+    const blacklisted = drop.some((pattern) => packageSourceMatches(entry, pattern));
+    if (whitelisted && !blacklisted) return enabledForm(entry);
+    return { source: packageSourceString(entry), autoload: false };
   });
 }
 
-export function parseModelSpec(spec: string): { provider?: string; modelId: string } {  const trimmed = spec.trim();
+export function parseModelSpec(spec: string): { provider?: string; modelId: string } {
+  const trimmed = spec.trim();
   const slash = trimmed.indexOf("/");
   if (slash <= 0 || slash === trimmed.length - 1) return { modelId: trimmed };
   return { provider: trimmed.slice(0, slash), modelId: trimmed.slice(slash + 1) };
@@ -297,9 +353,10 @@ export function buildProfileSettings(
   base: ManagedSettings,
   profile: Profile,
   options: { settingsBaseDir: string; packageRoot: string },
+  currentPackages: PackageSource[] | undefined,
 ): ManagedSettings {
   const next: ManagedSettings = {};
-  next.packages = applyPackagePolicy(base.packages, profile, options);
+  next.packages = applyPackagePolicy(mergePackageSets(base.packages, currentPackages), profile, options);
   next.extensions = profile.extensions ?? base.extensions;
   next.skills = profile.skills ?? base.skills;
   next.prompts = profile.prompts ?? base.prompts;
@@ -443,6 +500,17 @@ export function saveStore(store: Store, agentDir: string): void {
   writeJsonFile(path, next);
 }
 
+/**
+ * A fresh store has no base yet: capture whatever settings.json holds right now,
+ * because no profile has been applied on top of it.
+ * Returns true when the base was captured.
+ */
+export function ensureBase(store: Store, currentSettings: ManagedSettings): boolean {
+  if (Object.keys(store.base).length > 0) return false;
+  store.base = currentSettings;
+  return true;
+}
+
 export function profileNames(store: Store): string[] {
   return Object.keys(store.profiles).sort((a, b) => {
     if (a === BASE_PROFILE_NAME) return -1;
@@ -534,6 +602,41 @@ function applyRuntimeProfile(pi: ExtensionAPI, ctx: ExtensionContext, profile: P
   }
 }
 
+async function showProfile(
+  store: Store,
+  target: string | undefined,
+  currentSettings: ManagedSettings,
+  agentDir: string,
+  packageRoot: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  if (target === undefined) {
+    ctx.ui.notify("/switch show <profile>: missing profile name", "error");
+    return;
+  }
+  let resolved: { profile: Profile; chain: string[] };
+  try {
+    resolved = resolveProfile(target, store.profiles);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`/switch show: ${message}. Known profiles: ${profileNames(store).join(", ")}`, "error");
+    return;
+  }
+  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot }, currentSettings.packages);
+  const changes = diffSettings(currentSettings, nextSettings);
+  const lines = [
+    `profile: ${resolved.chain.join(" + ") || BASE_PROFILE_NAME}`,
+    resolved.profile.description ?? "",
+    "",
+    "Resolved configuration:",
+    ...summarizeSettings(nextSettings),
+    "",
+    "Changes vs current:",
+    ...(changes.length > 0 ? changes.map((change) => `  ${change}`) : ["  (none)"]),
+  ].filter((line) => line.length > 0);
+  showLong(ctx, lines);
+}
+
 async function handleSwitch(
   args: string,
   ctx: ExtensionCommandContext,
@@ -544,6 +647,10 @@ async function handleSwitch(
   const store = loadStore(agentDir, ctx.cwd);
   const settingsPath = join(agentDir, SETTINGS_FILE_NAME);
   const currentSettings = captureManagedSettings(readJsonFile(settingsPath));
+
+  if (ensureBase(store, currentSettings)) {
+    saveStore(store, agentDir);
+  }
 
   const sub = tokens[0];
 
@@ -659,6 +766,11 @@ async function handleSwitch(
   }
 
   const name = sub;
+  if (name === "show") {
+    await showProfile(store, tokens[1], currentSettings, agentDir, packageRoot, ctx);
+    return;
+  }
+
   let resolved: { profile: Profile; chain: string[] };
   try {
     resolved = resolveProfile(name, store.profiles);
@@ -672,23 +784,8 @@ async function handleSwitch(
   const nextSettings = buildProfileSettings(store.base, resolved.profile, {
     settingsBaseDir: agentDir,
     packageRoot,
-  });
+  }, currentSettings.packages);
   const changes = diffSettings(currentSettings, nextSettings);
-
-  if (sub === "show") {
-    const lines = [
-      `profile: ${resolved.chain.join(" + ") || BASE_PROFILE_NAME}`,
-      resolved.profile.description ? resolved.profile.description : "",
-      "",
-      "Resolved configuration:",
-      ...summarizeSettings(nextSettings),
-      "",
-      "Changes vs current:",
-      ...(changes.length > 0 ? changes.map((change) => `  ${change}`) : ["  (none)"]),
-    ].filter((line) => line !== "");
-    showLong(ctx, lines);
-    return;
-  }
 
   // Guard: project-level settings can shadow the global values we are writing.
   const projectSettingsPath = join(ctx.cwd, PROJECT_DIR_NAME, SETTINGS_FILE_NAME);
@@ -714,14 +811,14 @@ async function handleSwitch(
 }
 
 async function reloadWithSummary(ctx: ExtensionCommandContext, label: string, changes: string[]): Promise<void> {
+  // Report before reloading: nothing after ctx.reload() may reuse the old runtime,
+  // and UI calls from a stale extension instance can be dropped.
+  const summary = changes.length > 0 ? changes : ["(no settings changes)"];
+  showLong(ctx, [`/switch: ${label}`, ...summary.map((change) => `  ${change}`)]);
   if (ctx.isIdle() === false) {
     await ctx.waitForIdle();
   }
-  // Nothing after reload() may reuse state from the previous extension runtime.
   await ctx.reload();
-  ctx.ui.setStatus("pi-switch-config", `applied ${label}`);
-  const summary = changes.length > 0 ? changes : ["(no settings changes)"];
-  showLong(ctx, [`/switch: ${label}`, ...summary.map((change) => `  ${change}`)]);
 }
 
 /** Notifications are single-shot toasts; a widget is used for long output in the TUI. */
