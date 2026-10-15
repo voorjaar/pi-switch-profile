@@ -541,7 +541,18 @@ export function profileNames(store: Store): string[] {
 /* Extension                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "help"] as const;
+const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "doctor", "help"] as const;
+
+/**
+ * A profile name must be typeable as `/switch <name>`, so it may not collide with a
+ * subcommand, and it may not be the reserved `base`.
+ */
+export function validateNewProfileName(name: string): string | undefined {
+  if (name === BASE_PROFILE_NAME) return "'base' is reserved (use /switch refresh)";
+  if ((SUBCOMMANDS as readonly string[]).includes(name)) return `"${name}" is a subcommand, so a profile with that name could never be switched to`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return `"${name}" is not a usable profile name (letters, digits, dot, dash, underscore, starting with a letter or digit)`;
+  return undefined;
+}
 
 export default function (pi: ExtensionAPI): void {
   const agentDir = getAgentDir();
@@ -598,7 +609,11 @@ function applyRuntimeProfile(pi: ExtensionAPI, ctx: ExtensionContext, profile: P
   if (profile.tools !== undefined) {
     const registered = new Set(pi.getAllTools().map((tool) => tool.name));
     const wanted = profile.tools.filter((name) => registered.has(name));
+    const dropped = profile.tools.filter((name) => !registered.has(name));
     pi.setActiveTools(wanted);
+    if (dropped.length > 0) {
+      ctx.ui.notify(`/switch: tools not available in this session and left inactive: ${dropped.join(", ")}`, "warning");
+    }
   }
   if (profile.thinkingLevel !== undefined) {
     pi.setThinkingLevel(profile.thinkingLevel);
@@ -772,6 +787,12 @@ async function handleSwitch(
       ctx.ui.notify("/switch save: 'base' is reserved (use /switch refresh)", "error");
       return;
     }
+    const invalid = validateNewProfileName(name);
+    if (invalid !== undefined) {
+      ctx.ui.notify(`/switch save: ${invalid}`, "error");
+      return;
+    }
+    const overwriting = store.profiles[name] !== undefined;
     const enabledPackages = (currentSettings.packages ?? [])
       .filter((entry) => !packageIsDisabled(entry))
       .map(packageSourceString);
@@ -789,7 +810,12 @@ async function handleSwitch(
     };
     store.profiles[name] = profile;
     saveStore(store, agentDir);
-    ctx.ui.notify(`/switch save: saved profile "${name}" from the current settings`, "info");
+    ctx.ui.notify(
+      overwriting
+        ? `/switch save: overwrote profile "${name}" with the current settings`
+        : `/switch save: saved profile "${name}" from the current settings`,
+      "info",
+    );
     return;
   }
 

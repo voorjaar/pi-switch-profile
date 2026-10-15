@@ -102,7 +102,7 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 
 `base` is the snapshot of `settings.json` that every profile overlays. Capture it while no profile is active:
 
-- `/switch save my-setup` records the current configuration as a profile you can return to.
+- `/switch save my-setup` records the current configuration as a profile you can return to. Profile names must be typeable as `/switch <name>`, so `base` and the subcommand names (`list`, `show`, `save`, `delete`, `refresh`, `restore`, `doctor`, `help`) are reserved.
 - `/switch refresh` re-reads `settings.json` into `base`. Run it when you want the *enablement* snapshot to follow what `pi config` currently says.
 
 ### How packages are decided

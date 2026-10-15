@@ -26,6 +26,7 @@ import {
   profileNames,
   resolveProfile,
   saveStore,
+  validateNewProfileName,
   seedProfiles,
   SELF_PACKAGE_NAME,
   summarizeSettings,
@@ -341,6 +342,13 @@ check(
   "no drift check without an active profile",
   detectDrift({ ...reloaded, activeProfile: undefined }, handEdited, driftOptions) === undefined,
 );
+
+/* ---------------- profile names ---------------- */
+
+check("subcommand names cannot be profiles", ["list", "show", "save", "delete", "refresh", "restore", "doctor", "help"].every((name) => validateNewProfileName(name) !== undefined));
+check("base is reserved for the snapshot", validateNewProfileName("base") !== undefined);
+check("ordinary names are usable", validateNewProfileName("my-setup") === undefined && validateNewProfileName("dev.2") === undefined && validateNewProfileName("coder_x") === undefined);
+check("path-like and empty names are rejected", validateNewProfileName("../evil") !== undefined && validateNewProfileName("") !== undefined && validateNewProfileName("-x") !== undefined);
 
 writeFileSync(join(projectDir, ".pi", "pi-switch-config.json"), JSON.stringify({ profiles: { projectOnly: { theme: "solarized" } } }), "utf8");
 const merged = loadStore(storeHome, projectDir);

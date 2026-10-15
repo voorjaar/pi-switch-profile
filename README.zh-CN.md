@@ -102,7 +102,7 @@ pi -e ./extensions/switch.ts
 
 `base` 是每个配置档叠加其上的 `settings.json` 快照。请在没有配置档生效时捕获它：
 
-- `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。
+- `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。配置档名称必须能作为 `/switch <name>` 输入，因此 `base` 以及子命令名（`list`、`show`、`save`、`delete`、`refresh`、`restore`、`doctor`、`help`）是保留的。
 - `/switch refresh` 重新读取 `settings.json` 并更新 `base`。当你希望“启用状态”的快照跟随 `pi config` 的当前结果时执行一次。
 
 ### 包是这么决定的

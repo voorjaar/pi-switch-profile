@@ -184,6 +184,16 @@ async function main() {
     );
     check("doctor confirms settings match the active profile", doctorText.includes('Settings match profile "zen"'), doctorText.slice(-200));
 
+    // save / list / delete round trip, and a profile name that would be unreachable.
+    await runSlash("/switch save snapshot");
+    check("save reports the new profile", lastNotification((text) => text.includes('saved profile "snapshot"')) !== undefined, notifications.slice(-2).join(" | "));
+    await runSlash("/switch list");
+    check("saved profile appears in the list", (lastNotification((text) => text.includes("active profile")) ?? "").includes("snapshot"), notifications.slice(-1)[0]);
+    await runSlash("/switch save doctor");
+    check("save rejects a name shadowed by a subcommand", lastNotification((text) => text.includes("is a subcommand")) !== undefined, notifications.slice(-1)[0]);
+    await runSlash("/switch delete snapshot");
+    check("delete reports the removal", lastNotification((text) => text.includes('removed profile "snapshot"')) !== undefined, notifications.slice(-2).join(" | "));
+
     await runSlash("/switch restore");
     await waitFor(
       () => lastNotification((text) => text.includes("restored")) !== undefined,
@@ -193,6 +203,11 @@ async function main() {
     const restored = readSettings();
     check("restore put packages back", JSON.stringify(restored.packages) === JSON.stringify(installed.packages));
     check("restore put theme back", restored.theme === before.theme, restored.theme);
+
+    await runSlash("/switch refresh");
+    check("refresh reports a new base snapshot", lastNotification((text) => text.includes("base snapshot updated")) !== undefined, notifications.slice(-1)[0]);
+    const storeFile = JSON.parse(readFileSync(join(agentDir, "pi-switch-config.json"), "utf8"));
+    check("refresh persisted the base", JSON.stringify(storeFile.base?.theme) === JSON.stringify(restored.theme), storeFile.base?.theme);
   } finally {
     child.stdin.end();
     child.kill("SIGTERM");
