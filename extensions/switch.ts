@@ -851,10 +851,17 @@ function handleDelete(env: SwitchEnv, name: string | undefined): void {
     ctx.ui.notify(`/switch delete: unknown profile "${name}"`, "error");
     return;
   }
+  const wasActive = store.activeProfile === name;
   delete store.profiles[name];
   // The active profile no longer exists; do not claim it in the footer.
-  if (store.activeProfile === name) store.activeProfile = undefined;
+  if (wasActive) store.activeProfile = undefined;
   saveStore(store, env.agentDir);
+  if (wasActive) {
+    // Deleting does not reload, so clear the footer that still names the removed profile.
+    ctx.ui.setStatus("pi-switch-config", undefined);
+    ctx.ui.notify(`/switch delete: removed profile "${name}"; it was the active one, so its settings stay applied until you switch to another profile`, "warning");
+    return;
+  }
   ctx.ui.notify(`/switch delete: removed profile "${name}"`, "info");
 }
 

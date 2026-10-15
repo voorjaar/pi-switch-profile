@@ -19,6 +19,8 @@ const extensionPath = join(repoRoot, "extensions", "switch.ts");
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const settingsPath = join(agentDir, "settings.json");
 const backupPath = join(agentDir, "settings.json.live-test.bak");
+const storePath = join(agentDir, "pi-switch-config.json");
+const storeBackupPath = join(agentDir, "pi-switch-config.json.live-test.bak");
 
 const results = [];
 const notifications = [];
@@ -47,6 +49,10 @@ async function main() {
   if (!existsSync(extensionPath)) throw new Error(`missing extension entry: ${extensionPath}`);
   if (!existsSync(settingsPath)) throw new Error(`no settings.json at ${settingsPath}`);
   copyFileSync(settingsPath, backupPath);
+  // The extension keeps its own store next to settings.json; restore that too so a
+  // test run never leaves a saved profile or a refreshed base behind in the real agent dir.
+  if (existsSync(storePath)) copyFileSync(storePath, storeBackupPath);
+  else if (existsSync(storeBackupPath)) unlinkSync(storeBackupPath);
   const before = readSettings();
   // Install this package the way a user would, so the run exercises the real
   // path: the extension is loaded from settings.packages, and "zen" has to keep
@@ -194,6 +200,14 @@ async function main() {
     await runSlash("/switch delete snapshot");
     check("delete reports the removal", lastNotification((text) => text.includes('removed profile "snapshot"')) !== undefined, notifications.slice(-2).join(" | "));
 
+    // zen is the active profile here: deleting it must say the settings stay applied.
+    await runSlash("/switch delete zen");
+    check(
+      "deleting the active profile warns that its settings stay applied",
+      lastNotification((text) => text.includes("it was the active one")) !== undefined,
+      notifications.slice(-1)[0],
+    );
+
     await runSlash("/switch restore");
     await waitFor(
       () => lastNotification((text) => text.includes("restored")) !== undefined,
@@ -208,6 +222,37 @@ async function main() {
     check("refresh reports a new base snapshot", lastNotification((text) => text.includes("base snapshot updated")) !== undefined, notifications.slice(-1)[0]);
     const storeFile = JSON.parse(readFileSync(join(agentDir, "pi-switch-config.json"), "utf8"));
     check("refresh persisted the base", JSON.stringify(storeFile.base?.theme) === JSON.stringify(restored.theme), storeFile.base?.theme);
+
+    // The main happy path after a reload: switch forward again, not just back.
+    await runSlash("/switch coder");
+    const backOn = await waitFor(
+      () => lastNotification((text) => text.includes('profile "coder"')) !== undefined,
+      120_000,
+      "switch coder summary notification",
+    );
+    check("switching to coder after a reload reports changes", backOn, notifications.slice(-2).join(" | "));
+
+    const afterCoder = readSettings();
+    check(
+      "coder re-enables every known package",
+      (afterCoder.packages ?? []).length === (installed.packages ?? []).length && (afterCoder.packages ?? []).every((entry) => typeof entry === "string"),
+      JSON.stringify(afterCoder.packages ?? []).slice(0, 300),
+    );
+    check("coder drops the zen tool list", afterCoder.defaultTools === undefined, JSON.stringify(afterCoder.defaultTools));
+    check("coder restores the base theme", afterCoder.theme === before.theme, afterCoder.theme);
+
+    const commandsCoder = await send({ type: "get_commands" }, 120_000);
+    const coderNames = (commandsCoder.data?.commands ?? []).map((command) => command.name);
+    check("/switch survives the second reload", coderNames.includes("switch"), `${coderNames.length} commands`);
+
+    await runSlash("/switch doctor");
+    await waitFor(() => lastNotification((text) => text.includes("active tools")) !== undefined, 60_000, "doctor report after coder");
+    const coderDoctor = lastNotification((text) => text.includes("active tools")) ?? "";
+    check(
+      "tools from re-enabled packages are configured again",
+      /ast_grep_search|lens_diagnostic_mark|browser_navigate|web_search/.test(coderDoctor),
+      coderDoctor.match(/configured tools[^\n]*/)?.[0] ?? coderDoctor,
+    );
   } finally {
     child.stdin.end();
     child.kill("SIGTERM");
@@ -215,6 +260,11 @@ async function main() {
       copyFileSync(backupPath, settingsPath);
       unlinkSync(backupPath);
       log("restored the original settings.json");
+    }
+    if (existsSync(storeBackupPath)) {
+      copyFileSync(storeBackupPath, storePath);
+      unlinkSync(storeBackupPath);
+      log("restored the original profile store");
     }
   }
 

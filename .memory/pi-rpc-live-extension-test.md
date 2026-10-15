@@ -27,4 +27,4 @@ subcommand parsed as a profile name, and the post-reload notification loss.
 **How to apply.** Keep both layers: `npm test` for pure logic, `node scripts/live-test.mjs` for the reload
 path. Expect pi startup with many packages installed to take tens of seconds; run it as a background task.
 
-**Related** [[pi-reload-drops-stale-extension-ui-calls]], [[pi-extension-typecheck-without-node-modules]]
+**Related** [[pi-reload-drops-stale-extension-ui-calls]], [[pi-extension-typecheck-without-node-modules]], [[pi-live-test-restore-extension-store]]
