@@ -105,9 +105,11 @@ pi -e ./extensions/switch.ts
 - `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。配置档名称必须能作为 `/switch <name>` 输入，因此 `base` 以及子命令名（`list`、`show`、`save`、`delete`、`refresh`、`restore`、`doctor`、`help`）是保留的。
 - `/switch refresh` 重新读取 `settings.json` 并更新 `base`。当你希望“启用状态”的快照跟随 `pi config` 的当前结果时执行一次。
 
-### 包是这么决定的
+### 切换时写入的是什么
 
-包的集合取自当前的 `settings.json`，配置档只决定其中哪些处于启用状态：
+配置档会替换它管理的那些设置项。每个受管理的键优先取配置档的值，配置档没定义时取 `base` 快照的值；如果两者都没定义，这个键会从 `settings.json` 中**删除**。这正是 `/switch coder` 能撤销 `/switch zen` 的原因：`coder` 什么都没定义，而基线快照里没有 `defaultTools`，所以 `zen` 写入的工具列表会被清除，而不是一直留着。`/switch restore` 同理，它写回的是切换前记录的那份确切设置。
+
+`packages` 是唯一跟随当前 `settings.json`（而不是快照）的键：
 
 - 基线快照之后安装的包会被带过来，所以 `/switch coder` 会启用它，`/switch zen` 会关掉它。
 - 用 `pi remove` 移除的包会被丢弃，切换不会把它写回去（否则 pi 在解析 `npm:` 来源时会重新安装它）。

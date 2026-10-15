@@ -189,9 +189,13 @@ export function writeManagedSettings(settingsPath: string, managed: ManagedSetti
   const next: Record<string, unknown> = { ...current };
   for (const key of MANAGED_KEYS) {
     const value = (managed as Record<string, unknown>)[key];
-    // undefined means "this profile does not manage this key": keep the file value.
-    // Managed keys are never deleted, so switching profiles is lossless.
-    if (value === undefined) continue;
+    // A managed key with no value is cleared: switching profiles has to be able to
+    // remove what an earlier profile wrote, otherwise `restore` is not an undo and a
+    // profile without an override keeps the previous profile's value forever.
+    if (value === undefined) {
+      delete next[key];
+      continue;
+    }
     next[key] = value;
   }
   writeJsonFile(settingsPath, next);
@@ -353,10 +357,15 @@ export function buildProfileSettings(
   base: ManagedSettings,
   profile: Profile,
   options: { settingsBaseDir: string; packageRoot: string },
-  currentPackages: PackageSource[] | undefined,
+  currentSettings: ManagedSettings | undefined,
 ): ManagedSettings {
+  const current = currentSettings ?? {};
   const next: ManagedSettings = {};
-  next.packages = applyPackagePolicy(mergePackageSets(base.packages, currentPackages), profile, options);
+  next.packages = applyPackagePolicy(mergePackageSets(base.packages, current.packages), profile, options);
+  // Precedence: profile > base snapshot. Packages are the exception (see
+  // mergePackageSets) because pi install/remove change them out of band; every other
+  // managed key comes from the profile or the snapshot, so a key neither defines is
+  // cleared rather than left holding an earlier profile's value.
   next.extensions = profile.extensions ?? base.extensions;
   next.skills = profile.skills ?? base.skills;
   next.prompts = profile.prompts ?? base.prompts;
@@ -447,7 +456,7 @@ export function detectDrift(
   } catch {
     return undefined;
   }
-  const expected = buildProfileSettings(store.base, resolved.profile, options, currentSettings.packages);
+  const expected = buildProfileSettings(store.base, resolved.profile, options, currentSettings);
   const changes = diffSettings(currentSettings, expected);
   if (changes.length === 0) return undefined;
   return { profile: store.activeProfile, changes };
@@ -655,7 +664,7 @@ async function showProfile(
     ctx.ui.notify(`/switch show: ${message}. Known profiles: ${profileNames(store).join(", ")}`, "error");
     return;
   }
-  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot }, currentSettings.packages);
+  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
   const lines = [
     `profile: ${resolved.chain.join(" + ") || BASE_PROFILE_NAME}`,
@@ -880,7 +889,7 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
   const nextSettings = buildProfileSettings(store.base, resolved.profile, {
     settingsBaseDir: env.agentDir,
     packageRoot: env.packageRoot,
-  }, currentSettings.packages);
+  }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
 
   // Guard: project-level settings can shadow the global values we are writing.

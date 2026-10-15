@@ -105,9 +105,15 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 - `/switch save my-setup` records the current configuration as a profile you can return to. Profile names must be typeable as `/switch <name>`, so `base` and the subcommand names (`list`, `show`, `save`, `delete`, `refresh`, `restore`, `doctor`, `help`) are reserved.
 - `/switch refresh` re-reads `settings.json` into `base`. Run it when you want the *enablement* snapshot to follow what `pi config` currently says.
 
-### How packages are decided
+### What a switch writes
 
-The set of packages is taken from live `settings.json`; a profile only decides which of them are enabled:
+A profile replaces the settings it manages. For each managed key the value comes from the profile, or from the
+`base` snapshot when the profile does not define it, and if neither defines it the key is **removed** from
+`settings.json`. That is what makes `/switch coder` undo `/switch zen`: `coder` defines nothing, and the base
+snapshot had no `defaultTools`, so the tool list `zen` wrote is cleared instead of lingering. `/switch restore`
+is the same rule applied to the exact settings recorded before the switch.
+
+`packages` is the one key that follows live `settings.json` instead of the snapshot:
 
 - A package you installed after the base snapshot is carried over, so `/switch coder` enables it and `/switch zen` turns it off.
 - A package you removed with `pi remove` is dropped, so switching never writes it back (pi would reinstall an `npm:` source during resolve).

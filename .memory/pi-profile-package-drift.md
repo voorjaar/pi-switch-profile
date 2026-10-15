@@ -27,4 +27,4 @@ never asked to do.
 **How to apply.** When changing profile semantics, keep this split: the set comes from live settings, the
 policy from the profile. Do not let a profile write a package list that settings.json never contained.
 
-**Related** [[pi-package-autoload-disable]], [[pi-extension-self-preservation]]
+**Related** [[pi-package-autoload-disable]], [[pi-extension-self-preservation]], [[pi-settings-managed-keys-must-be-cleared]]

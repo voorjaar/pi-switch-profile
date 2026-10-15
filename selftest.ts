@@ -229,7 +229,7 @@ const base: ManagedSettings = {
   defaultThinkingLevel: "medium",
 };
 
-const zenSettings = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, base.packages);
+const zenSettings = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, base);
 check("zen keeps self enabled", (zenSettings.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, "pi-switch-config")));
 eq("zen theme", zenSettings.theme, "system");
 eq("zen thinking", zenSettings.defaultThinkingLevel, "low");
@@ -237,23 +237,23 @@ eq("zen tools", zenSettings.defaultTools, ["read", "bash", "edit", "write"]);
 eq("zen keeps base model", { provider: zenSettings.defaultProvider, model: zenSettings.defaultModel }, { provider: "strata", model: "qwen3.8-flash-next" });
 check("zen clears prompts", zenSettings.prompts?.includes("!prompts/**") === true, zenSettings.prompts);
 
-const modelProfile = buildProfileSettings(base, { model: "anthropic/claude-sonnet-4-5" }, { settingsBaseDir: agentDir, packageRoot }, base.packages);
+const modelProfile = buildProfileSettings(base, { model: "anthropic/claude-sonnet-4-5" }, { settingsBaseDir: agentDir, packageRoot }, base);
 eq("profile model overrides provider and model", { provider: modelProfile.defaultProvider, model: modelProfile.defaultModel }, {
   provider: "anthropic",
   model: "claude-sonnet-4-5",
 });
 
-const noop = buildProfileSettings(base, {}, { settingsBaseDir: agentDir, packageRoot }, base.packages);
+const noop = buildProfileSettings(base, {}, { settingsBaseDir: agentDir, packageRoot }, base);
 eq("empty profile equals base", [noop.packages, noop.extensions, noop.skills, noop.prompts, noop.themes, noop.theme, noop.defaultProvider, noop.defaultModel, noop.defaultThinkingLevel, noop.defaultTools], [base.packages, base.extensions, base.skills, base.prompts, base.themes, base.theme, base.defaultProvider, base.defaultModel, base.defaultThinkingLevel, base.defaultTools]);
 
 /* ---------------- newly installed and removed packages ---------------- */
 
 const driftedCurrent: PackageSource[] = ["npm:pi-lens", "npm:pi-brand-new", "npm:pi-switch-config"];
-const zenDrifted = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, driftedCurrent);
+const zenDrifted = buildProfileSettings(base, resolveProfile("zen", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, { ...base, packages: driftedCurrent });
 check("zen disables a package installed after the snapshot", (zenDrifted.packages ?? []).some((entry) => packageIsDisabled(entry) && packageSourceMatches(entry, "pi-brand-new")), zenDrifted.packages);
 check("zen still keeps itself enabled", (zenDrifted.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, "pi-switch-config")), zenDrifted.packages);
 
-const coderDrifted = buildProfileSettings(base, resolveProfile("coder", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, driftedCurrent);
+const coderDrifted = buildProfileSettings(base, resolveProfile("coder", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, { ...base, packages: driftedCurrent });
 check("coder re-enables everything currently known", (coderDrifted.packages ?? []).every((entry) => !packageIsDisabled(entry)), coderDrifted.packages);
 check("coder does not resurrect a removed package", (coderDrifted.packages ?? []).some((entry) => packageSourceMatches(entry, "pi-web-access")) === false, coderDrifted.packages);
 
@@ -293,6 +293,26 @@ const again = readJson(settingsPath);
 eq("undo restores packages", asPackages(again.packages), basePackages);
 eq("undo restores theme", again.theme, "github-dark-default");
 eq("undo returns the zen snapshot", restored.theme, "system");
+check("undo removes a tool list the earlier profile wrote", (again as Record<string, unknown>).defaultTools === undefined, again);
+
+const coderAfterZen = buildProfileSettings(base, resolveProfile("coder", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, zenSettings);
+check(
+  "a profile with no overrides clears what an earlier profile wrote",
+  coderAfterZen.defaultTools === undefined && coderAfterZen.theme === "github-dark-default" && coderAfterZen.defaultThinkingLevel === "medium",
+  coderAfterZen,
+);
+
+const noBaseValue = buildProfileSettings(
+  { packages: ["npm:pi-switch-config"] },
+  {},
+  { settingsBaseDir: agentDir, packageRoot },
+  { packages: ["npm:pi-switch-config"], defaultTools: ["read"], theme: "solarized" },
+);
+check(
+  "a key neither the profile nor the base defines is left unset",
+  noBaseValue.defaultTools === undefined && noBaseValue.theme === undefined,
+  noBaseValue,
+);
 
 eq("captureManagedSettings ignores unmanaged keys", Object.keys(captureManagedSettings({ theme: "x", compaction: { enabled: true } })), ["theme"]);
 
@@ -325,7 +345,7 @@ eq("profile names sorted with base first", profileNames(reloaded)[0], "base");
 
 const driftOptions = { settingsBaseDir: agentDir, packageRoot };
 const zenResolved = resolveProfile("zen", reloaded.profiles).profile;
-const matching = buildProfileSettings(base, zenResolved, driftOptions, base.packages);
+const matching = buildProfileSettings(base, zenResolved, driftOptions, base);
 check(
   "no drift when settings match the active profile",
   detectDrift(reloaded, matching, driftOptions) === undefined,
@@ -382,7 +402,7 @@ check(
 );
 check("save records the model as a profile spec", saved.model === "strata/qwen3.8-flash-next", saved.model);
 
-const savedApplied = buildProfileSettings(base, saved, driftOptions, base.packages);
+const savedApplied = buildProfileSettings(base, saved, driftOptions, base);
 check(
   "a saved profile re-enables exactly what was enabled when it was saved",
   JSON.stringify((savedApplied.packages ?? []).filter((entry) => !packageIsDisabled(entry)).map(packageSourceString)) === JSON.stringify(["npm:pi-lens", "npm:pi-switch-config"]),
