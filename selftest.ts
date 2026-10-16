@@ -15,6 +15,7 @@ import {
   captureResourceWhitelist,
   collectResourceCandidates,
   defaultConfiguration,
+  excludeTermToPatterns,
   diffSettings,
   detectDrift,
   ensureBase,
@@ -22,6 +23,7 @@ import {
   isSelfPackageSource,
   legacyResourceToWhitelist,
   LEGACY_STORE_FILE_NAME,
+  loadUndo,
   mergePackageSets,
   loadStore,
   migrateLegacyProfiles,
@@ -43,7 +45,9 @@ import {
   profileNames,
   resolveProfile,
   saveStore,
+  saveUndo,
   STORE_FILE_NAME,
+  UNDO_FILE_NAME,
   type Store,
   validateNewProfileName,
   revertNeedsReload,
@@ -114,7 +118,6 @@ writeFileSync(join(migrateHome, LEGACY_STORE_FILE_NAME), JSON.stringify({
   base: { theme: "dracula" },
   activeProfile: "zen",
   profiles: { zen: { theme: "system" } },
-  history: [],
   revertSession: "off",
 }), "utf8");
 const migratedLoaded = loadStore(migrateHome, tempDir());
@@ -413,6 +416,55 @@ eq("the default profile keeps the base resources", { extensions: defaultApplied.
 const plainApplied = buildProfileSettings(base, {}, whitelistOptions, base);
 check("a non-baseline profile with no overrides empties the resources", plainApplied.themes?.includes("!themes/**") === true, plainApplied.themes);
 check("and clears the ones base had", plainApplied.extensions?.includes("!extensions/**") === true && plainApplied.skills?.includes("!skills/**") === true, plainApplied);
+
+check(
+  "exclude turns a bare word into a double-star deny",
+  JSON.stringify(excludeTermToPatterns("review")) === JSON.stringify(["!**/review*", "!**/review/**"]),
+  excludeTermToPatterns("review"),
+);
+check("exclude keeps a path or glob as written", JSON.stringify(excludeTermToPatterns("extensions/review.ts")) === JSON.stringify(["!extensions/review.ts"]));
+
+const excludeOnly = buildProfileSettings(base, { exclude: { extensions: ["review"] } }, whitelistOptions, base);
+check(
+  "an exclude-only profile keeps everything else",
+  JSON.stringify(excludeOnly.extensions) === JSON.stringify(["!**/review*", "!**/review/**"]),
+  excludeOnly.extensions,
+);
+check(
+  "an exclude-only profile still starts from nothing for the kinds it does not mention",
+  JSON.stringify(excludeOnly.skills) === JSON.stringify(["!skills/**"]),
+  excludeOnly.skills,
+);
+check(
+  "a baseline default that only excludes keeps the other kinds as the snapshot has them",
+  JSON.stringify(buildProfileSettings(base, { exclude: { extensions: ["review"] } }, { ...whitelistOptions, profileName: "default" }, base).skills) === JSON.stringify(base.skills),
+  buildProfileSettings(base, { exclude: { extensions: ["review"] } }, { ...whitelistOptions, profileName: "default" }, base).skills,
+);
+
+const narrowed = buildProfileSettings(base, { extensions: ["extensions"], exclude: { extensions: ["pi-lens"] } }, whitelistOptions, base);
+check(
+  "an exclude narrows the whitelist instead of replacing it",
+  JSON.stringify(narrowed.extensions) === JSON.stringify(["!extensions/**", "-builtin:llama.cpp", "-builtin:codemode", "-builtin:tool-search", "-builtin:mcp", "+extensions/review.ts"]),
+  narrowed.extensions,
+);
+const builtinDrop = buildProfileSettings(base, { exclude: { extensions: ["mcp"] } }, whitelistOptions, base);
+check("a built-in is excluded by naming it", builtinDrop.extensions?.includes("-builtin:mcp") === true, builtinDrop.extensions);
+
+const inheritedExclude = resolveProfile("kid", {
+  da: { exclude: { extensions: ["review"] } },
+  kid: { extends: "da", exclude: { skills: ["archive"] } },
+}).profile;
+check(
+  "extends merges exclude per kind",
+  JSON.stringify(inheritedExclude.exclude) === JSON.stringify({ extensions: ["review"], skills: ["archive"] }),
+  inheritedExclude.exclude,
+);
+const defaultExcluding = buildProfileSettings(base, { exclude: { extensions: ["review"] } }, { ...whitelistOptions, profileName: "default" }, base);
+check(
+  "a baseline default can still exclude a single extension",
+  (defaultExcluding.extensions ?? []).includes("!**/review*") === true,
+  defaultExcluding.extensions,
+);
 rmSync(fixtureDir, { recursive: true, force: true });
 
 const modelProfile = buildProfileSettings(base, { model: "anthropic/claude-sonnet-4-5" }, { settingsBaseDir: agentDir, packageRoot }, base);
@@ -512,12 +564,44 @@ saveStore(emptyStore, storeHome);
 const store = loadStore(storeHome, projectDir);
 check("a captured base survives a reload", JSON.stringify(store.base) === JSON.stringify(base), store.base);
 store.activeProfile = "zen";
-store.history = [{ at: new Date().toISOString(), fromProfile: null, toProfile: "zen", settings: base }];
+saveUndo({ at: new Date().toISOString(), fromProfile: null, toProfile: "zen", settings: base }, storeHome);
 saveStore(store, storeHome);
 
 const reloaded = loadStore(storeHome, projectDir);
 eq("store round-trips active profile", reloaded.activeProfile, "zen");
-eq("store round-trips history", reloaded.history.length, 1);
+check(
+  "the undo record round-trips in its own file",
+  loadUndo(storeHome)?.toProfile === "zen" && existsSync(join(storeHome, UNDO_FILE_NAME)),
+  loadUndo(storeHome),
+);
+check(
+  "the profile store itself carries no history",
+  readFileSync(join(storeHome, STORE_FILE_NAME), "utf8").includes("history") === false,
+  readFileSync(join(storeHome, STORE_FILE_NAME), "utf8").slice(0, 120),
+);
+saveUndo(undefined, storeHome);
+check("clearing the undo record deletes the file", loadUndo(storeHome) === undefined && existsSync(join(storeHome, UNDO_FILE_NAME)) === false);
+
+const migratedUndoHome = tempDir();
+writeFileSync(join(migratedUndoHome, STORE_FILE_NAME), JSON.stringify({
+  version: 1,
+  base: {},
+  profiles: {},
+  history: [{ at: "x", fromProfile: "zen", toProfile: "default", settings: { theme: "before" } }],
+}), "utf8");
+loadStore(migratedUndoHome, tempDir());
+check(
+  "a store that kept a history array moves its last entry to the undo file",
+  loadUndo(migratedUndoHome)?.settings.theme === "before",
+  loadUndo(migratedUndoHome),
+);
+loadStore(migratedUndoHome, tempDir());
+saveStore(loadStore(migratedUndoHome, tempDir()), migratedUndoHome);
+check(
+  "and the array is dropped on the next save",
+  readFileSync(join(migratedUndoHome, STORE_FILE_NAME), "utf8").includes("history") === false,
+  readFileSync(join(migratedUndoHome, STORE_FILE_NAME), "utf8").slice(0, 120),
+);
 eq("profile names sorted with base first", profileNames(reloaded)[0], "base");
 
 /* ---------------- drift detection ---------------- */
@@ -561,7 +645,7 @@ const corruptHome = tempDir();
 writeFileSync(join(corruptHome, "pi-switch-profile.json"), "{ not json", "utf8");
 const corruptStore = loadStore(corruptHome, tempDir());
 check("a corrupt store falls back to seed profiles instead of throwing", corruptStore.profiles.base !== undefined && corruptStore.profiles.zen !== undefined, Object.keys(corruptStore.profiles));
-check("a corrupt store keeps no active profile or history", corruptStore.activeProfile === undefined && corruptStore.history.length === 0, corruptStore);
+check("a corrupt store keeps no active profile or undo record", corruptStore.activeProfile === undefined && loadUndo(corruptHome) === undefined, corruptStore);
 
 /* ---------------- legacy seed rename: coder -> default ---------------- */
 
@@ -571,7 +655,6 @@ writeFileSync(join(legacyHome, "pi-switch-profile.json"), JSON.stringify({
   base: { theme: "github-dark-default" },
   activeProfile: "coder",
   profiles: { base: { description: "base" }, zen: { theme: "system" }, coder: { description: "Everything from the base snapshot (no overrides)" } },
-  history: [],
 }), "utf8");
 const migratedStore = loadStore(legacyHome, tempDir());
 check("the legacy seed profile is renamed on load", migratedStore.profiles.default !== undefined && migratedStore.profiles.coder === undefined, Object.keys(migratedStore.profiles));
@@ -582,7 +665,6 @@ writeFileSync(join(customHome, "pi-switch-profile.json"), JSON.stringify({
   version: 1,
   base: {},
   profiles: { coder: { description: "mine", theme: "dracula" } },
-  history: [],
 }), "utf8");
 const customStore = loadStore(customHome, tempDir());
 check("a real profile the user named coder is left alone", customStore.profiles.coder?.theme === "dracula" && customStore.profiles.default === undefined, customStore.profiles);
@@ -592,7 +674,6 @@ writeFileSync(join(clashHome, "pi-switch-profile.json"), JSON.stringify({
   version: 1,
   base: {},
   profiles: { coder: { description: "Everything from the base snapshot (no overrides)" }, default: { theme: "solarized" } },
-  history: [],
 }), "utf8");
 const clashStore = loadStore(clashHome, tempDir());
 check("the rename never overwrites a profile the user already made", clashStore.profiles.default?.theme === "solarized" && clashStore.profiles.coder !== undefined, clashStore.profiles);
@@ -611,7 +692,6 @@ const revertStore: Store = {
   base,
   activeProfile: "zen",
   profiles: { ...seedProfiles() },
-  history: [],
   revertSession: "end",
 };
 const zenCurrent: ManagedSettings = { ...zenSettings };

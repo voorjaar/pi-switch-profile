@@ -19,7 +19,13 @@ const extensionPath = join(repoRoot, "extensions", "switch.ts");
 const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 const settingsPath = join(agentDir, "settings.json");
 const backupPath = join(agentDir, "settings.json.live-test.bak");
-const storePaths = [join(agentDir, "pi-switch-profile.json"), join(agentDir, "pi-switch-config.json")];
+const profileStorePaths = [
+  join(agentDir, "pi-switch-profile.json"),
+  join(agentDir, "pi-switch-config.json"),
+];
+// The single undo record lives in its own file and a run that switches/restores rewrites it.
+const undoPath = join(agentDir, "pi-switch-undo.json");
+const storePaths = [...profileStorePaths, undoPath];
 const storeBackupPaths = storePaths.map((path) => `${path}.live-test.bak`);
 
 const results = [];
@@ -52,7 +58,7 @@ function zip2(a, b) {
 }
 
 function readStore() {
-  for (const path of storePaths) {
+  for (const path of profileStorePaths) {
     try {
       return JSON.parse(readFileSync(path, "utf8"));
     } catch {
@@ -60,6 +66,18 @@ function readStore() {
     }
   }
   return {};
+}
+
+function readUndo() {
+  try {
+    return JSON.parse(readFileSync(undoPath, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+function listUndoFiles() {
+  return [undoPath, join(agentDir, "pi-switch-undo.json.live-test.bak")].filter((path) => existsSync(path));
 }
 
 /** Wire a pi rpc child into the shared notification/waiter state; resolves on exit. */
@@ -269,7 +287,7 @@ async function main() {
       notifications.slice(-1)[0],
     );
 
-    // Two switches are in the history now (zen, then snapshot) and one restore undoes one.
+    // Only the last switch is undoable now: the record lives in its own single-entry file.
     await runSlash("/switch restore");
     await waitFor(
       () => lastNotification((text) => text.includes("restored")) !== undefined,
@@ -282,21 +300,44 @@ async function main() {
       backToZen.theme === "system" && JSON.stringify(backToZen.defaultTools) === JSON.stringify(["read", "bash", "edit", "write"]),
       { theme: backToZen.theme, defaultTools: backToZen.defaultTools },
     );
+    check(
+      "the undo record is consumed by the restore",
+      !existsSync(join(agentDir, "pi-switch-undo.json")),
+      listUndoFiles(),
+    );
 
     await runSlash("/switch restore");
     await waitFor(
-      () => lastNotification((text) => text.includes("restored")) !== undefined,
+      () => lastNotification((text) => text.includes("nothing to restore")) !== undefined,
+      60_000,
+      "second restore reports nothing left",
+    );
+    check(
+      "a second restore does not reach further back",
+      readSettings().theme === "system",
+      readSettings().theme,
+    );
+
+    // Switching to the base snapshot is what puts the captured configuration back.
+    await runSlash("/switch base");
+    await waitFor(
+      () => lastNotification((text) => text.includes('profile "base"')) !== undefined,
       120_000,
-      "restore summary notification",
+      "switch base summary notification",
     );
     const restored = readSettings();
-    check("restore put packages back", JSON.stringify(restored.packages) === JSON.stringify(installed.packages));
-    check("restore put theme back", restored.theme === before.theme, restored.theme);
+    check("base puts the captured settings back", JSON.stringify(restored.packages) === JSON.stringify(installed.packages));
+    check("base restores the theme", restored.theme === before.theme, restored.theme);
 
     await runSlash("/switch refresh");
     check("refresh reports a new base snapshot", lastNotification((text) => text.includes("base snapshot updated")) !== undefined, notifications.slice(-1)[0]);
     const storeFile = JSON.parse(readFileSync(storePaths[0], "utf8"));
     check("refresh persisted the base", JSON.stringify(storeFile.base?.theme) === JSON.stringify(restored.theme), storeFile.base?.theme);
+    check(
+      "the profile store keeps no history array",
+      storeFile.history === undefined,
+      Object.keys(storeFile),
+    );
 
     // The main happy path after a reload: switch forward again, not just back.
     await runSlash("/switch default");
@@ -327,10 +368,40 @@ async function main() {
       defaultDoctor.match(/configured tools[^\n]*/)?.[0] ?? defaultDoctor,
     );
 
+    // A hand-written profile that uses `exclude`: everything except one package.
+    const storeOnDisk = JSON.parse(readFileSync(profileStorePaths[0], "utf8"));
+    storeOnDisk.profiles = {
+      ...(storeOnDisk.profiles ?? {}),
+      "no-web": { description: "everything except pi-web-access", exclude: { packages: ["pi-web-access"] } },
+    };
+    writeFileSync(profileStorePaths[0], JSON.stringify(storeOnDisk), "utf8");
+    await runSlash("/switch no-web");
+    await waitFor(
+      () => lastNotification((text) => text.includes('profile "no-web"')) !== undefined,
+      120_000,
+      "switch no-web summary notification",
+    );
+    const afterExclude = readSettings();
+    const excludedPackages = (afterExclude.packages ?? [])
+      .filter((entry) => typeof entry === "object" && entry !== null && entry.autoload === false)
+      .map((entry) => String(entry.source));
+    check(
+      "exclude disables only the named package",
+      excludedPackages.length === 1 && excludedPackages[0].includes("pi-web-access"),
+      JSON.stringify(excludedPackages),
+    );
+    check(
+      "exclude keeps every other package enabled",
+      (afterExclude.packages ?? []).length === (installed.packages ?? []).length,
+      (afterExclude.packages ?? []).length,
+    );
+
     // A profile created by /switch save must be switchable, and restore must undo exactly one switch.
     await runSlash("/switch save last");
     check("save reports the second saved profile", lastNotification((text) => text.includes('saved profile "last"')) !== undefined, notifications.slice(-1)[0]);
 
+    const beforeSavedSwitch = readSettings();
+    const profileBeforeSavedSwitch = readStore().activeProfile;
     await runSlash("/switch last");
     const appliedSaved = await waitFor(
       () => lastNotification((text) => text.includes('profile "last"')) !== undefined,
@@ -344,15 +415,15 @@ async function main() {
     const backAfterSaved = readSettings();
     check(
       "restore undoes exactly the last switch",
-      JSON.stringify(backAfterSaved.theme) === JSON.stringify(afterDefault.theme)
-        && JSON.stringify(backAfterSaved.packages) === JSON.stringify(afterDefault.packages)
-        && JSON.stringify(backAfterSaved.defaultTools) === JSON.stringify(afterDefault.defaultTools),
+      JSON.stringify(backAfterSaved.theme) === JSON.stringify(beforeSavedSwitch.theme)
+        && JSON.stringify(backAfterSaved.packages) === JSON.stringify(beforeSavedSwitch.packages)
+        && JSON.stringify(backAfterSaved.defaultTools) === JSON.stringify(beforeSavedSwitch.defaultTools),
       { theme: backAfterSaved.theme, packages: (backAfterSaved.packages ?? []).length, defaultTools: backAfterSaved.defaultTools },
     );
     const doctorAfterRestore = await runDoctor("doctor report after restore");
     check(
       "restore re-activates the profile it returns to",
-      doctorAfterRestore.includes('Settings match profile "default"'),
+      doctorAfterRestore.includes(`Settings match profile "${profileBeforeSavedSwitch}"`),
       doctorAfterRestore.slice(-200),
     );
     // revertSession "end": a clean session close puts the default configuration back.
@@ -386,7 +457,11 @@ async function main() {
     check("the revert mode persisted across the session", storeAfterQuit.revertSession === "end", storeAfterQuit.revertSession);
     check("the revert set the active profile to default", storeAfterQuit.activeProfile === "default", storeAfterQuit.activeProfile);
     check("the revert recorded a notice for the next session", storeAfterQuit.revertedOnQuit?.fromProfile === "zen", storeAfterQuit.revertedOnQuit);
-    check("the revert is undoable from history", (storeAfterQuit.history ?? []).slice(-1)[0]?.toProfile === "default", (storeAfterQuit.history ?? []).slice(-1)[0]);
+    check(
+      "the revert recorded an undo record for /switch restore",
+      readUndo()?.toProfile === "default",
+      readUndo(),
+    );
 
     // The revert happens while the UI is tearing down, so the notice has to arrive in the
     // session after it.

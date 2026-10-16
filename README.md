@@ -12,7 +12,7 @@ Use it to move between a stripped-down session and a fully equipped one without 
 - **Whitelists, not exclusions.** A profile lists what to keep (`"skills": ["novel-writer"]`) and everything else is off - no `!extensions/**` patterns to write.
 - **Nothing is uninstalled.** Profiles overlay a captured *base* snapshot of `settings.json`. A disabled pi package becomes `{ "source": "...", "autoload": false }` instead of disappearing, so re-enabling it is instant.
 - **Never locks itself out.** The extension keeps its own package enabled even in the strictest profile.
-- **Undo.** Every switch records the settings it replaced; `/switch restore` puts them back.
+- **Undo.** The settings a switch replaced are recorded in a separate one-entry file (`~/.pi/agent/pi-switch-undo.json`); `/switch restore` puts them back and clears it.
 - **Session-scoped switches.** `revertSession` puts the session back on the default configuration at session start (the default) or at session close, so a switch you only wanted for now does not leak into the next session.
 - **Seeded profiles.** `zen` (zero skills, zero extensions) and `default` (everything from the base snapshot) are created on first use.
 - **Visible state.** The footer shows the active profile, and `/switch` prints the resolved configuration and the exact changes. If you edit `settings.json` by hand afterwards, `/switch` and `/switch doctor` say so instead of pretending the profile is applied.
@@ -44,7 +44,7 @@ If you edit `settings.json` by hand, run `/reload` afterwards.
 | `/switch show <profile>` | Show the resolved profile and the diff against the current configuration, changing nothing |
 | `/switch save <profile>` | Capture the current configuration as a new profile |
 | `/switch refresh` | Re-capture the base snapshot from `settings.json` (do this after installing a package by hand) |
-| `/switch restore` | Undo the last switch |
+| `/switch restore` | Undo the last switch (the record lives in `~/.pi/agent/pi-switch-undo.json`) |
 | `/switch revert-session <start\|end\|off\|status>` | When the session returns to the default configuration (default: `start`) |
 | `/switch delete <profile>` | Remove a profile |
 | `/switch doctor` | Show what the live session actually has: model, thinking level, active and configured tools, and whether settings match the active profile |
@@ -97,6 +97,7 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 | --- | --- | --- |
 | `packages` | `packages` | Whitelist of package sources to keep enabled (substring match, for example `pi-lens` matches `npm:pi-lens`). Everything else in `base` gets `autoload: false`. This extension is always kept. |
 | `disablePackages` | `packages` | Blacklist of package sources to disable; all others stay as they are. |
+| `exclude` | `packages`, `extensions`, `skills`, `prompts`, `themes` | What to throw away, per kind: `{ "extensions": ["review"], "skills": ["archive"] }`. Alone it means "everything except these"; with a whitelist of the same kind it narrows that whitelist. `exclude.packages` is an alias for `disablePackages`. |
 | `extensions`, `skills`, `prompts`, `themes` | same | **Whitelist** of what to keep: a term is a substring (`review`, `novel-writer`) or a glob (`extensions/review.ts`, `skills/nov*`). Everything that matches nothing is disabled, so `[]` means "none" and you never write an exclusion pattern. See [Resource whitelists](#resource-whitelists). |
 | `theme` | `theme` | Theme name, for example `system`, `dracula`, or a custom theme name. |
 | `model` | `defaultProvider`, `defaultModel` | `provider/modelId` or a bare `modelId`. Applied to the live session after the reload as well. |
@@ -130,6 +131,18 @@ gave no resource overrides to. That is why `/switch default` still turns everyth
 - Profiles written by older versions (lists of `!pattern`, `+path`, `-path`) are migrated on load: the
   entries that were being kept become the whitelist, and a list that only denied things becomes `[]`.
 
+#### Excluding one thing
+
+To keep an extension out of `default` but on in one profile, give `default` an `exclude` list - it stays
+"everything else", and the other profile whitelists what it wants:
+
+```json
+"default": { "exclude": { "extensions": ["review"] } },
+"review":  { "packages": ["pi-simplify"], "extensions": ["review", "pi-lens"] }
+```
+
+`/switch default` then loads everything except `review`; `/switch review` loads only what it lists.
+
 ### Base, save, and refresh
 
 `base` is the snapshot of `settings.json` that every profile overlays. Capture it while no profile is active:
@@ -143,7 +156,7 @@ A profile replaces the settings it manages. For each managed key the value comes
 `base` snapshot when the profile does not define it, and if neither defines it the key is **removed** from
 `settings.json`. That is what makes `/switch default` undo `/switch zen`: `default` defines nothing, and the base
 snapshot had no `defaultTools`, so the tool list `zen` wrote is cleared instead of lingering. `/switch restore`
-is the same rule applied to the exact settings recorded before the switch.
+is the same rule applied to the exact settings recorded before the last switch.
 
 `packages` is the one key that follows live `settings.json` instead of the snapshot:
 
@@ -170,7 +183,7 @@ the machine sleeps with a profile applied, the next session drops it. `"end"` is
 correct the moment the session closes.
 
 - A start revert runs when the settings differ from the default configuration. It writes `settings.json`, records
-  history (so `/switch restore` undoes it), and enforces the default profile's tools, model, and thinking level on
+  the previous settings for `/switch restore`, and enforces the default profile's tools, model, and thinking level on
   the live session. If the change touches packages, extensions, skills, prompts, or themes - which pi resolved
   before the extension could act - it then reloads the session, so the previous profile's resources actually go
   away. A change only in theme, model, thinking level, or tools is applied in place with no reload.

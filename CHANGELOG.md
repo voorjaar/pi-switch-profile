@@ -6,6 +6,11 @@ All notable changes to pi-switch-profile are documented here.
 
 ### Added
 
+- Added `exclude` to profiles: what to throw away per resource kind, for example
+  `"exclude": { "extensions": ["review"], "skills": ["archive"] }`. On its own it means "everything except
+  these", so `default` can keep everything but one extension; combined with a whitelist of the same kind it
+  narrows that whitelist. `exclude.packages` is an alias for `disablePackages`, and a built-in is excluded by
+  naming it (`mcp` or `builtin:mcp`).
 - Added `revertSession: "start" | "end" | "off"` (default `"start"`), reported and changed with
   `/switch revert-session <start|end|off|status>`. It decides when the session returns to the default
   configuration (the `default` profile, or the base snapshot when it does not exist): `start` puts the settings
@@ -39,6 +44,10 @@ All notable changes to pi-switch-profile are documented here.
 
 ### Changed
 
+- The undo record no longer lives in the profile store. The settings before the last switch are written to
+  `~/.pi/agent/pi-switch-undo.json` and `/switch restore` clears it, so `pi-switch-profile.json` holds only
+  `base`, profiles, the active profile, and the revert option. The `history` array (up to 12 full settings
+  snapshots) is dropped: its last entry is carried to the undo file on load.
 - **Profile resource keys are whitelists now.** `extensions`, `skills`, `prompts`, and `themes` list what to
   keep - a substring (`novel-writer`) or a glob (`extensions/review.ts`) - and everything else is switched off,
   so a profile no longer needs `!extensions/**` or `-builtin:mcp` written by hand. A built-in is kept by naming

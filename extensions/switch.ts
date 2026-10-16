@@ -15,7 +15,7 @@
  * without loading the pi runtime.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +34,15 @@ export interface PackageFilter {
   themes?: string[];
 }
 export type PackageSource = string | PackageFilter;
+
+/** What `exclude` may name, by resource kind. */
+export interface ResourceExclude {
+  packages?: string[];
+  extensions?: string[];
+  skills?: string[];
+  prompts?: string[];
+  themes?: string[];
+}
 
 /** The settings keys this extension owns. Everything else in settings.json is untouched. */
 export interface ManagedSettings {
@@ -58,6 +67,16 @@ export interface Profile {
   /** Disable these package sources (substring match). */
   disablePackages?: string[];
   /**
+   * What to throw away, per resource kind: `{ "extensions": ["review"], "skills": ["archive"] }`.
+   * A term is a substring (`review`), a path (`extensions/review.ts`), or a glob, plus `packages`
+   * as an alias for `disablePackages`.
+   *
+   * On its own an `exclude` list means "everything except these". Combined with a whitelist of the
+   * same kind it narrows that whitelist further: the whitelist decides the candidates, `exclude`
+   * removes some of them. A built-in is excluded by naming it (`mcp` or `builtin:mcp`).
+   */
+  exclude?: ResourceExclude;
+  /**
    * Whitelist of extensions to keep: a term is a substring (for example `pi-lens`) or a glob
    * (`extensions/review.ts`, `skills/nov*`). A built-in is kept by naming it (`builtin:mcp`).
    * Anything that matches nothing is disabled, so an empty list means "no extensions". A
@@ -76,7 +95,8 @@ export interface Profile {
   tools?: string[];
 }
 
-export interface Snapshot {
+/** The settings as they were immediately before the last switch. `/switch restore` replays it. */
+export interface UndoRecord {
   at: string;
   fromProfile: string | null;
   toProfile: string;
@@ -88,7 +108,6 @@ export interface Store {
   base: ManagedSettings;
   activeProfile?: string;
   profiles: Record<string, Profile>;
-  history: Snapshot[];
   /** When the session should end on the default configuration. Defaults to "start". */
   revertSession?: RevertSessionMode;
   /** Set when a revert at session close actually changed settings; reported at the next session start. */
@@ -96,6 +115,9 @@ export interface Store {
 }
 
 export type RevertSessionMode = "start" | "end" | "off";
+
+/** A store file as it may be found on disk, including keys this version no longer writes. */
+type LegacyStoreFile = Store & { history?: UndoRecord[] };
 
 export interface RevertNotice {
   at: string;
@@ -111,13 +133,17 @@ export const SELF_PACKAGE_NAME = "pi-switch-profile";
 /** The name this package had before it was renamed; still matched for self-detection. */
 export const LEGACY_SELF_PACKAGE_NAMES = ["pi-switch-config"];
 export const STORE_FILE_NAME = "pi-switch-profile.json";
+/**
+ * The single undo record lives in its own file so the profile store stays a description of
+ * profiles. `/switch restore` reads it and deletes it.
+ */
+export const UNDO_FILE_NAME = "pi-switch-undo.json";
 /** Store file name written by older versions. */
 export const LEGACY_STORE_FILE_NAME = "pi-switch-config.json";
 export const SETTINGS_FILE_NAME = "settings.json";
 export const PROJECT_DIR_NAME = ".pi";
 const BASE_PROFILE_NAME = "base";
 const DEFAULT_PROFILE_NAME = "default";
-const MAX_HISTORY = 12;
 
 export function getAgentDir(): string {
   const fromEnv = process.env.PI_CODING_AGENT_DIR;
@@ -349,7 +375,7 @@ export function applyPackagePolicy(
   options: { settingsBaseDir: string; packageRoot: string },
 ): PackageSource[] {
   const keep = profile.packages;
-  const drop = profile.disablePackages ?? [];
+  const drop = [...(profile.disablePackages ?? []), ...(profile.exclude?.packages ?? [])];
   const hasPolicy = keep !== undefined || drop.length > 0;
 
   return templates.map((entry) => {
@@ -492,21 +518,59 @@ export function collectResourceCandidates(agentDir: string, cwd: string): Resour
 }
 
 /**
+ * Turn one `exclude` term into pi deny entries. A bare word has to become a double-star glob
+ * because pi's `!pattern` matching is minimatch against the relative path or the basename: an
+ * exclusion written as `review` alone would not match `extensions/review.ts`, one written as
+ * `**` + `/review*` does.
+ */
+export function excludeTermToPatterns(term: string): string[] {
+  const cleaned = term.replace(/^[!+-]/, "").replace(/^\.\/+/, "").split("\\").join("/").trim();
+  if (cleaned.length === 0) return [];
+  if (/[*?]/.test(cleaned) || cleaned.includes("/")) return [`!${cleaned}`];
+  return [`!**/${cleaned}*`, `!**/${cleaned}/**`];
+}
+
+/**
  * Turn a whitelist into the settings entries pi understands: deny the whole auto-discovered
  * tree, then force-include the matches (pi applies `+path` after `!pattern`). Built-ins are
  * named one by one because they are not under `extensions/**`.
+ *
+ * With no whitelist the profile is saying "everything except these": the base entries are kept
+ * and the exclude terms become denies.
  */
-export function buildResourceSetting(kind: ResourceKind, whitelist: string[], candidates: ResourceCandidate[]): string[] {
-  const entries: string[] = [`!${kind}/**`];
-  if (kind === "extensions") {
-    for (const name of BUILTIN_EXTENSION_NAMES) {
-      entries.push(whitelist.some((term) => builtinTermMatches(term, name)) ? `+builtin:${name}` : `-builtin:${name}`);
+export function buildResourceSetting(
+  kind: ResourceKind,
+  whitelist: string[] | undefined,
+  candidates: ResourceCandidate[],
+  options: { exclude?: string[]; baseEntries?: string[] } = {},
+): string[] {
+  const exclude = options.exclude ?? [];
+  const builtins = kind === "extensions" ? BUILTIN_EXTENSION_NAMES : [];
+
+  if (whitelist === undefined) {
+    const entries = [...(options.baseEntries ?? [])];
+    for (const term of exclude) {
+      const named = builtins.filter((name) => builtinTermMatches(term, name));
+      if (named.length > 0) {
+        for (const name of named) entries.push(`-builtin:${name}`);
+        continue;
+      }
+      for (const pattern of excludeTermToPatterns(term)) entries.push(pattern);
     }
+    return entries;
+  }
+
+  const entries: string[] = [`!${kind}/**`];
+  for (const name of builtins) {
+    const on = whitelist.some((term) => builtinTermMatches(term, name)) && !exclude.some((term) => builtinTermMatches(term, name));
+    entries.push(on ? `+builtin:${name}` : `-builtin:${name}`);
   }
   const included = new Set<string>();
   for (const candidate of candidates) {
     if (candidate.kind !== kind) continue;
-    if (whitelist.some((term) => resourceTermMatches(candidate.rel, term))) included.add(candidate.rel);
+    if (!whitelist.some((term) => resourceTermMatches(candidate.rel, term))) continue;
+    if (exclude.some((term) => resourceTermMatches(candidate.rel, term))) continue;
+    included.add(candidate.rel);
   }
   for (const rel of [...included].sort()) entries.push(`+${rel}`);
   return entries;
@@ -604,6 +668,9 @@ function mergeProfileOverlay(target: ManagedSettings & Profile, profile: Profile
     const value = profile[key];
     if (value !== undefined) (out as Record<string, unknown>)[key] = value;
   }
+  // `exclude` is merged per kind, so a child can add one exclusion without re-declaring the
+  // parent's.
+  if (profile.exclude !== undefined) out.exclude = { ...out.exclude, ...profile.exclude };
   return out;
 }
 
@@ -627,10 +694,18 @@ export function buildProfileSettings(
   const candidates = options.cwd !== undefined ? collectResourceCandidates(options.settingsBaseDir, options.cwd) : [];
   const baseline = options.profileName === undefined || isBaselineProfile(options.profileName, profile);
   for (const kind of RESOURCE_KINDS) {
-    const declared = profile[kind];
-    if (declared !== undefined) next[kind] = buildResourceSetting(kind, declared, candidates);
-    else if (baseline) next[kind] = base[kind];
-    else next[kind] = buildResourceSetting(kind, [], candidates);
+    const whitelist = profile[kind];
+    const exclude = profile.exclude?.[kind] ?? [];
+    if (whitelist === undefined && exclude.length === 0) {
+      next[kind] = baseline ? base[kind] : buildResourceSetting(kind, [], candidates);
+      continue;
+    }
+    if (whitelist === undefined) {
+      // "Everything except these": keep the snapshot's entries and deny the exclude terms.
+      next[kind] = buildResourceSetting(kind, undefined, candidates, { exclude, baseEntries: baseline ? base[kind] : undefined });
+      continue;
+    }
+    next[kind] = buildResourceSetting(kind, whitelist, candidates, { exclude });
   }
   next.theme = profile.theme ?? base.theme;
   next.defaultThinkingLevel = profile.thinkingLevel ?? base.defaultThinkingLevel;
@@ -809,8 +884,8 @@ export function loadStore(agentDir: string, cwd: string): Store {
   const paths = storePath(agentDir, cwd);
   migrateStoreFile(paths.global, join(agentDir, LEGACY_STORE_FILE_NAME));
   migrateStoreFile(paths.project, join(cwd, PROJECT_DIR_NAME, LEGACY_STORE_FILE_NAME));
-  const globalStore = readJsonFile(paths.global) as Store | undefined;
-  const projectStore = readJsonFile(paths.project) as Store | undefined;
+  const globalStore = readJsonFile(paths.global) as LegacyStoreFile | undefined;
+  const projectStore = readJsonFile(paths.project) as LegacyStoreFile | undefined;
 
   const migrated = migrateLegacyProfiles({
     ...(globalStore === undefined ? seedProfiles() : (globalStore.profiles ?? {})),
@@ -826,12 +901,17 @@ export function loadStore(agentDir: string, cwd: string): Store {
     // drift detection would point at a profile that is no longer in the list.
     activeProfile: recordedActive !== undefined && renamed.has(recordedActive) ? renamed.get(recordedActive) : recordedActive,
     profiles: migrated.profiles,
-    history: Array.isArray(globalStore?.history) ? globalStore.history : [],
     revertSession: parseRevertSessionMode(globalStore),
     revertedOnQuit: parseRevertNotice(globalStore?.revertedOnQuit),
   };
   if (!store.profiles[BASE_PROFILE_NAME]) {
     store.profiles = { [BASE_PROFILE_NAME]: { description: "The captured base configuration" }, ...store.profiles };
+  }
+  // A store written by the version that kept a history array: carry its last entry to the undo
+  // file so `/switch restore` still works, then the array is dropped on the next save.
+  if (!existsSync(join(agentDir, UNDO_FILE_NAME)) && Array.isArray(globalStore?.history) && globalStore.history.length > 0) {
+    const last = globalStore.history[globalStore.history.length - 1] as UndoRecord | undefined;
+    if (last !== undefined && typeof last === "object" && last.settings !== undefined) saveUndo(last, agentDir);
   }
   return store;
 }
@@ -846,11 +926,33 @@ export function saveStore(store: Store, agentDir: string): void {
     base: store.base,
     activeProfile: store.activeProfile,
     profiles: store.profiles,
-    history: store.history.slice(-MAX_HISTORY),
     revertSession: store.revertSession,
     revertedOnQuit: store.revertedOnQuit,
   };
+  // The undo record moved to its own file; a store written by an older version still has the
+  // array sitting in it.
+  delete next.history;
   writeJsonFile(path, next);
+}
+
+/** The single undo record, kept in `<agent-dir>/pi-switch-undo.json` so the store stays profiles-only. */
+export function loadUndo(agentDir: string): UndoRecord | undefined {
+  const record = readJsonFile(join(agentDir, UNDO_FILE_NAME)) as UndoRecord | undefined;
+  if (record === undefined || typeof record !== "object" || record.settings === undefined) return undefined;
+  return record;
+}
+
+export function saveUndo(record: UndoRecord | undefined, agentDir: string): void {
+  const path = join(agentDir, UNDO_FILE_NAME);
+  if (record === undefined) {
+    try {
+      if (existsSync(path)) unlinkSync(path);
+    } catch {
+      /* a leftover undo file is not worth failing a switch over */
+    }
+    return;
+  }
+  writeJsonFile(path, record);
 }
 
 /**
@@ -1330,7 +1432,7 @@ function applySessionRevert(
   const at = new Date().toISOString();
   const wasActive = store.activeProfile ?? null;
   const previous = writeManagedSettings(settingsPath, plan.settings);
-  store.history = [...store.history, { at, fromProfile: wasActive, toProfile: plan.profileLabel, settings: previous }].slice(-MAX_HISTORY);
+  saveUndo({ at, fromProfile: wasActive, toProfile: plan.profileLabel, settings: previous }, agentDir);
   store.activeProfile = plan.profileLabel;
   // Only a revert at session close needs a notice for later: at session start the session
   // that has to hear about it is already here.
@@ -1346,12 +1448,12 @@ export function restoreActiveProfile(fromProfile: string | null | undefined, pro
 
 async function handleRestore(env: SwitchEnv): Promise<void> {
   const { ctx, store, settingsPath, currentSettings } = env;
-  const snapshot = store.history[store.history.length - 1];
+  const snapshot = loadUndo(env.agentDir);
   if (!snapshot) {
     ctx.ui.notify("/switch restore: nothing to restore", "warning");
     return;
   }
-  store.history = store.history.slice(0, -1);
+  saveUndo(undefined, env.agentDir);
   const changes = diffSettings(currentSettings, snapshot.settings);
   writeManagedSettings(settingsPath, snapshot.settings);
   const backTo = restoreActiveProfile(snapshot.fromProfile, store.profiles);
@@ -1482,12 +1584,12 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
   }
 
   const previous = writeManagedSettings(settingsPath, nextSettings);
-  store.history = [...store.history, {
+  saveUndo({
     at: new Date().toISOString(),
     fromProfile: store.activeProfile ?? null,
     toProfile: name,
     settings: previous,
-  }].slice(-MAX_HISTORY);
+  }, env.agentDir);
   store.activeProfile = name;
   saveStore(store, env.agentDir);
 

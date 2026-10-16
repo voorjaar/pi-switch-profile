@@ -12,7 +12,7 @@
 - **白名单，不是排除模式。** 配置档只写要保留的东西（`"skills": ["novel-writer"]`），其余全部关掉——不需要写 `!extensions/**` 这种模式。
 - **不会卸载任何东西。** 每个配置档都叠加在一份捕获到的*基线*（base）快照之上。被禁用的 pi 包会变成 `{ "source": "...", "autoload": false }` 而不是消失，所以重新启用是瞬间的。
 - **不会把自己锁死。** 即使是最严格的配置档，也会保留扩展自身所在的包。
-- **可撤销。** 每次切换都会记录被替换的设置，`/switch restore` 原样恢复。
+- **可撤销。** 切换被替换掉的设置会记在一个单独的单条文件里（`~/.pi/agent/pi-switch-undo.json`），`/switch restore` 原样恢复并清掉它。
 - **会话级切换。** `revertSession` 会在会话开始（默认）或会话结束时把会话换回默认配置，所以一时用的切换不会泄漏到下一个会话。
 - **内置配置档。** 首次使用时自动创建 `zen`（零技能、零扩展）和 `default`（基线快照的全部内容）。
 - **状态可见。** 底栏显示当前生效的配置档，`/switch` 会打印解析后的配置与逐项变更。如果你之后手动改过 `settings.json`，`/switch` 与 `/switch doctor` 会直接指出这一点，而不是假装配置档仍然生效。
@@ -44,7 +44,7 @@ pi -e ./extensions/switch.ts
 | `/switch show <profile>` | 显示解析后的配置档以及与当前配置的差异，不做任何修改 |
 | `/switch save <profile>` | 把当前配置捕获为一个新的配置档 |
 | `/switch refresh` | 从 `settings.json` 重新捕获基线快照（手动安装某个包之后建议执行） |
-| `/switch restore` | 撤销上一次切换 |
+| `/switch restore` | 撤销上一次切换（记录在 `~/.pi/agent/pi-switch-undo.json`） |
 | `/switch revert-session <start\|end\|off\|status>` | 会话何时回到默认配置（默认 `start`） |
 | `/switch delete <profile>` | 删除一个配置档 |
 | `/switch doctor` | 显示当前会话真实状态：模型、思考等级、激活与已配置的工具，以及设置是否与当前配置档一致 |
@@ -97,6 +97,7 @@ pi -e ./extensions/switch.ts
 | --- | --- | --- |
 | `packages` | `packages` | 保留启用的包来源白名单（子串匹配，例如 `pi-lens` 能匹配 `npm:pi-lens`）。`base` 中其余的包都会被设为 `autoload: false`。本扩展所在的包始终保留。 |
 | `disablePackages` | `packages` | 要禁用的包来源黑名单，其余保持不变。 |
+| `exclude` | `packages`、`extensions`、`skills`、`prompts`、`themes` | 要扔掉的东西，按资源类型分开：`{ "extensions": ["review"], "skills": ["archive"] }`。单独用就是“除了这些全都开”；跟同类型的白名单一起用就是在这个白名单里再剔掉。`exclude.packages` 是 `disablePackages` 的别名。 |
 | `extensions`、`skills`、`prompts`、`themes` | 同名设置 | **白名单**：写你想保留的东西，一个词（`review`、`novel-writer`）或一个 glob（`extensions/review.ts`、`skills/nov*`）。匹配不到任何东西的就关掉，`[]` 就是“一个都不要”，所以你不需要写排除模式。见[资源白名单](#资源白名单)。 |
 | `theme` | `theme` | 主题名称，例如 `system`、`dracula`，或自定义主题名。 |
 | `model` | `defaultProvider`、`defaultModel` | 写成 `provider/modelId`，或只写 `modelId`。reload 之后也会作用到当前会话。 |
@@ -124,6 +125,18 @@ pi -e ./extensions/switch.ts
 - 旧版本写的配置档（`!pattern`、`+path`、`-path` 列表）会在加载时迁移：原本被保留的项变成白名单，
   只有排除项的列表变成 `[]`。
 
+#### 只排除一个东西
+
+想让某个扩展不在 `default` 里、只在某个配置档里启用，就给 `default` 写 `exclude`——它仍然是“其余全开”，
+另一个配置档则列出自己要的东西：
+
+```json
+"default": { "exclude": { "extensions": ["review"] } },
+"review":  { "packages": ["pi-simplify"], "extensions": ["review", "pi-lens"] }
+```
+
+`/switch default` 会加载除 `review` 以外的全部；`/switch review` 只加载它列出的那些。
+
 ### 基线、save 与 refresh
 
 `base` 是每个配置档叠加其上的 `settings.json` 快照。请在没有配置档生效时捕获它：
@@ -133,7 +146,7 @@ pi -e ./extensions/switch.ts
 
 ### 切换时写入的是什么
 
-配置档会替换它管理的那些设置项。每个受管理的键优先取配置档的值，配置档没定义时取 `base` 快照的值；如果两者都没定义，这个键会从 `settings.json` 中**删除**。这正是 `/switch default` 能撤销 `/switch zen` 的原因：`default` 什么都没定义，而基线快照里没有 `defaultTools`，所以 `zen` 写入的工具列表会被清除，而不是一直留着。`/switch restore` 同理，它写回的是切换前记录的那份确切设置。
+配置档会替换它管理的那些设置项。每个受管理的键优先取配置档的值，配置档没定义时取 `base` 快照的值；如果两者都没定义，这个键会从 `settings.json` 中**删除**。这正是 `/switch default` 能撤销 `/switch zen` 的原因：`default` 什么都没定义，而基线快照里没有 `defaultTools`，所以 `zen` 写入的工具列表会被清除，而不是一直留着。`/switch restore` 同理，它写回的是上一次切换前记录的那份确切设置。
 
 `packages` 是唯一跟随当前 `settings.json`（而不是快照）的键：
 
@@ -155,7 +168,7 @@ pi -e ./extensions/switch.ts
 
 默认是 `start`，因为它能覆盖“会话来不及自己收尾”的情况：如果 pi 被 kill 或者电脑休眠时还挂着某个配置档，下一个会话会把它丢掉。`end` 适合希望会话一结束文件就立刻正确的人。
 
-- 开始时的回退只在设置与默认配置不一致时执行。它会写 `settings.json`、记录历史（所以 `/switch restore` 能撤销），并在当前会话里重新应用默认配置档的工具、模型和思考等级。如果改动涉及包、扩展、技能、提示词或主题（这些在扩展能行动之前就被 pi 解析完了），它还会接着 reload 会话，所以上一个配置档加载的资源会真的消失。只改主题、模型、思考等级或工具时不需要 reload，就地应用。
+- 开始时的回退只在设置与默认配置不一致时执行。它会写 `settings.json`、为 `/switch restore` 记下之前的设置，并在当前会话里重新应用默认配置档的工具、模型和思考等级。如果改动涉及包、扩展、技能、提示词或主题（这些在扩展能行动之前就被 pi 解析完了），它还会接着 reload 会话，所以上一个配置档加载的资源会真的消失。只改主题、模型、思考等级或工具时不需要 reload，就地应用。
 - 结束时的回退只在真正的会话关闭时执行。`/reload`、`/new`、`/resume`、`/fork` 都不是会话关闭，所以切过去的配置档会一直生效。那时 UI 正在拆掉，所以通知会被存下来，在下一个会话开始时显示。
 - 如果设置本来就已经是默认配置，则什么都不写；基线快照还没建立时也不写，所以没有切换过的会话不会动这个文件。
 - pi 只会写回它自己改过的设置项，所以退出时写入的回退基本保留，只有会话中 pi 自己改过的键会不一样（例如 `/model` 之后的 `defaultModel`）。剩下的差异可以用 `/switch doctor` 查看。
