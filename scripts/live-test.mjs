@@ -165,7 +165,7 @@ async function main() {
     await runSlash("/switch list");
     check("/switch list works after reload", lastNotification((text) => text.includes("active profile")) !== undefined, notifications.slice(-2).join(" | "));
 
-    await runSlash("/switch show coder");
+    await runSlash("/switch show default");
     check("/switch show works after reload", lastNotification((text) => text.includes("Resolved configuration")) !== undefined, notifications.slice(-2).join(" | "));
 
     const listText = lastNotification((text) => text.includes("active profile")) ?? "";
@@ -231,34 +231,34 @@ async function main() {
     check("refresh persisted the base", JSON.stringify(storeFile.base?.theme) === JSON.stringify(restored.theme), storeFile.base?.theme);
 
     // The main happy path after a reload: switch forward again, not just back.
-    await runSlash("/switch coder");
+    await runSlash("/switch default");
     const backOn = await waitFor(
-      () => lastNotification((text) => text.includes('profile "coder"')) !== undefined,
+      () => lastNotification((text) => text.includes('profile "default"')) !== undefined,
       120_000,
-      "switch coder summary notification",
+      "switch default summary notification",
     );
-    check("switching to coder after a reload reports changes", backOn, notifications.slice(-2).join(" | "));
+    check("switching to default after a reload reports changes", backOn, notifications.slice(-2).join(" | "));
 
-    const afterCoder = readSettings();
+    const afterDefault = readSettings();
     check(
-      "coder re-enables every known package",
-      (afterCoder.packages ?? []).length === (installed.packages ?? []).length && (afterCoder.packages ?? []).every((entry) => typeof entry === "string"),
-      JSON.stringify(afterCoder.packages ?? []).slice(0, 300),
+      "default re-enables every known package",
+      (afterDefault.packages ?? []).length === (installed.packages ?? []).length && (afterDefault.packages ?? []).every((entry) => typeof entry === "string"),
+      JSON.stringify(afterDefault.packages ?? []).slice(0, 300),
     );
-    check("coder drops the zen tool list", afterCoder.defaultTools === undefined, JSON.stringify(afterCoder.defaultTools));
-    check("coder restores the base theme", afterCoder.theme === before.theme, afterCoder.theme);
+    check("default drops the zen tool list", afterDefault.defaultTools === undefined, JSON.stringify(afterDefault.defaultTools));
+    check("default restores the base theme", afterDefault.theme === before.theme, afterDefault.theme);
 
-    const commandsCoder = await send({ type: "get_commands" }, 120_000);
-    const coderNames = (commandsCoder.data?.commands ?? []).map((command) => command.name);
-    check("/switch survives the second reload", coderNames.includes("switch"), `${coderNames.length} commands`);
+    const commandsDefault = await send({ type: "get_commands" }, 120_000);
+    const defaultNames = (commandsDefault.data?.commands ?? []).map((command) => command.name);
+    check("/switch survives the second reload", defaultNames.includes("switch"), `${defaultNames.length} commands`);
 
     await runSlash("/switch doctor");
-    await waitFor(() => lastNotification((text) => text.includes("active tools")) !== undefined, 60_000, "doctor report after coder");
-    const coderDoctor = lastNotification((text) => text.includes("active tools")) ?? "";
+    await waitFor(() => lastNotification((text) => text.includes("active tools")) !== undefined, 60_000, "doctor report after default");
+    const defaultDoctor = lastNotification((text) => text.includes("active tools")) ?? "";
     check(
       "tools from re-enabled packages are configured again",
-      /ast_grep_search|lens_diagnostic_mark|browser_navigate|web_search/.test(coderDoctor),
-      coderDoctor.match(/configured tools[^\n]*/)?.[0] ?? coderDoctor,
+      /ast_grep_search|lens_diagnostic_mark|browser_navigate|web_search/.test(defaultDoctor),
+      defaultDoctor.match(/configured tools[^\n]*/)?.[0] ?? defaultDoctor,
     );
 
     // A profile created by /switch save must be switchable, and restore must undo exactly one switch.
@@ -278,9 +278,9 @@ async function main() {
     const backAfterSaved = readSettings();
     check(
       "restore undoes exactly the last switch",
-      JSON.stringify(backAfterSaved.theme) === JSON.stringify(afterCoder.theme)
-        && JSON.stringify(backAfterSaved.packages) === JSON.stringify(afterCoder.packages)
-        && JSON.stringify(backAfterSaved.defaultTools) === JSON.stringify(afterCoder.defaultTools),
+      JSON.stringify(backAfterSaved.theme) === JSON.stringify(afterDefault.theme)
+        && JSON.stringify(backAfterSaved.packages) === JSON.stringify(afterDefault.packages)
+        && JSON.stringify(backAfterSaved.defaultTools) === JSON.stringify(afterDefault.defaultTools),
       { theme: backAfterSaved.theme, packages: (backAfterSaved.packages ?? []).length, defaultTools: backAfterSaved.defaultTools },
     );
     await runSlash("/switch doctor");
@@ -288,7 +288,7 @@ async function main() {
     const doctorAfterRestore = lastNotification((text) => text.includes("active tools")) ?? "";
     check(
       "restore re-activates the profile it returns to",
-      doctorAfterRestore.includes('Settings match profile "coder"'),
+      doctorAfterRestore.includes('Settings match profile "default"'),
       doctorAfterRestore.slice(-200),
     );
   } finally {

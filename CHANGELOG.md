@@ -8,7 +8,7 @@ All notable changes to pi-switch-config are documented here.
 
 - Added `/switch <profile>`: applies a configuration profile to `~/.pi/agent/settings.json` and runs pi's own
   reload, so packages, extensions, skills, prompt templates, themes, theme, model, thinking level, and default
-  tools all change at once. Ships with seeded `zen` (no packages, no auto-discovered resources) and `coder`
+  tools all change at once. Ships with seeded `zen` (no packages, no auto-discovered resources) and `default`
   (the base snapshot) profiles.
 - Added `/switch list`, `/switch show <profile>` (resolved profile plus diff, changing nothing),
   `/switch save <profile>`, `/switch refresh`, `/switch restore` (undo the last switch),
@@ -26,12 +26,18 @@ All notable changes to pi-switch-config are documented here.
 - Added a warning when a profile lists tools that no package registered in this session.
 - Added bilingual documentation (`README.md`, `README.zh-CN.md`).
 
+### Changed
+
+- Renamed the seeded no-override profile from `coder` to `default`. A store written by an earlier version is
+  migrated on load, but only the seeded profile: a real profile you named `coder` is left alone, and so is a
+  `default` you made yourself.
+
 ### Fixed
 
 - Fixed `/switch restore` re-activating a profile that had been deleted since the switch: the footer no longer
   names a profile that does not exist, and the report says the settings were restored from a since-deleted profile.
 - Fixed profile switches being sticky: a managed key that neither the profile nor the base snapshot defines is
-  now removed from `settings.json` instead of keeping the value an earlier profile wrote. `/switch coder` now
+  now removed from `settings.json` instead of keeping the value an earlier profile wrote. `/switch default` now
   really clears the tool list `/switch zen` set, and `/switch restore` is a complete undo.
 - Fixed an unparseable `settings.json` or profile store being overwritten without a copy: it is now saved as
   `<file>.corrupt.bak` before the rewrite.

@@ -8,11 +8,11 @@
 
 ## 特性
 
-- **一条命令，整体切换。** `/switch zen` 关闭技能、扩展、提示模板和自定义主题；`/switch coder` 再把它们打开。
+- **一条命令，整体切换。** `/switch zen` 关闭技能、扩展、提示模板和自定义主题；`/switch default` 再把它们打开。
 - **不会卸载任何东西。** 每个配置档都叠加在一份捕获到的*基线*（base）快照之上。被禁用的 pi 包会变成 `{ "source": "...", "autoload": false }` 而不是消失，所以重新启用是瞬间的。
 - **不会把自己锁死。** 即使是最严格的配置档，也会保留扩展自身所在的包。
 - **可撤销。** 每次切换都会记录被替换的设置，`/switch restore` 原样恢复。
-- **内置配置档。** 首次使用时自动创建 `zen`（零技能、零扩展）和 `coder`（基线快照的全部内容）。
+- **内置配置档。** 首次使用时自动创建 `zen`（零技能、零扩展）和 `default`（基线快照的全部内容）。
 - **状态可见。** 底栏显示当前生效的配置档，`/switch` 会打印解析后的配置与逐项变更。如果你之后手动改过 `settings.json`，`/switch` 与 `/switch doctor` 会直接指出这一点，而不是假装配置档仍然生效。
 - **自动补全。** 输入 `/switch ` 后按 Tab 会列出配置档名称。
 
@@ -107,11 +107,11 @@ pi -e ./extensions/switch.ts
 
 ### 切换时写入的是什么
 
-配置档会替换它管理的那些设置项。每个受管理的键优先取配置档的值，配置档没定义时取 `base` 快照的值；如果两者都没定义，这个键会从 `settings.json` 中**删除**。这正是 `/switch coder` 能撤销 `/switch zen` 的原因：`coder` 什么都没定义，而基线快照里没有 `defaultTools`，所以 `zen` 写入的工具列表会被清除，而不是一直留着。`/switch restore` 同理，它写回的是切换前记录的那份确切设置。
+配置档会替换它管理的那些设置项。每个受管理的键优先取配置档的值，配置档没定义时取 `base` 快照的值；如果两者都没定义，这个键会从 `settings.json` 中**删除**。这正是 `/switch default` 能撤销 `/switch zen` 的原因：`default` 什么都没定义，而基线快照里没有 `defaultTools`，所以 `zen` 写入的工具列表会被清除，而不是一直留着。`/switch restore` 同理，它写回的是切换前记录的那份确切设置。
 
 `packages` 是唯一跟随当前 `settings.json`（而不是快照）的键：
 
-- 基线快照之后安装的包会被带过来，所以 `/switch coder` 会启用它，`/switch zen` 会关掉它。
+- 基线快照之后安装的包会被带过来，所以 `/switch default` 会启用它，`/switch zen` 会关掉它。
 - 用 `pi remove` 移除的包会被丢弃，切换不会把它写回去（否则 pi 在解析 `npm:` 来源时会重新安装它）。
 - 既没有 `packages` 也没有 `disablePackages` 的配置档会启用所有已知的包。`packages` 是白名单，`disablePackages` 是黑名单，两者都支持部分匹配，例如 `pi-lens` 或 `npm:pi-lens`。
 - 本扩展始终把自己保持在启用状态。如果配置档能把自己关掉，就只能靠手动改 `settings.json` 才能回来了。

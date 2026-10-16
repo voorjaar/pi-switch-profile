@@ -8,11 +8,11 @@ Use it to move between a stripped-down session and a fully equipped one without 
 
 ## Features
 
-- **One command, full swap.** `/switch zen` turns off skills, extensions, prompt templates, and custom themes; `/switch coder` turns them back on.
+- **One command, full swap.** `/switch zen` turns off skills, extensions, prompt templates, and custom themes; `/switch default` turns them back on.
 - **Nothing is uninstalled.** Profiles overlay a captured *base* snapshot of `settings.json`. A disabled pi package becomes `{ "source": "...", "autoload": false }` instead of disappearing, so re-enabling it is instant.
 - **Never locks itself out.** The extension keeps its own package enabled even in the strictest profile.
 - **Undo.** Every switch records the settings it replaced; `/switch restore` puts them back.
-- **Seeded profiles.** `zen` (zero skills, zero extensions) and `coder` (everything from the base snapshot) are created on first use.
+- **Seeded profiles.** `zen` (zero skills, zero extensions) and `default` (everything from the base snapshot) are created on first use.
 - **Visible state.** The footer shows the active profile, and `/switch` prints the resolved configuration and the exact changes. If you edit `settings.json` by hand afterwards, `/switch` and `/switch doctor` say so instead of pretending the profile is applied.
 - **Autocomplete.** Profile names complete as command arguments.
 
@@ -109,13 +109,13 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 
 A profile replaces the settings it manages. For each managed key the value comes from the profile, or from the
 `base` snapshot when the profile does not define it, and if neither defines it the key is **removed** from
-`settings.json`. That is what makes `/switch coder` undo `/switch zen`: `coder` defines nothing, and the base
+`settings.json`. That is what makes `/switch default` undo `/switch zen`: `default` defines nothing, and the base
 snapshot had no `defaultTools`, so the tool list `zen` wrote is cleared instead of lingering. `/switch restore`
 is the same rule applied to the exact settings recorded before the switch.
 
 `packages` is the one key that follows live `settings.json` instead of the snapshot:
 
-- A package you installed after the base snapshot is carried over, so `/switch coder` enables it and `/switch zen` turns it off.
+- A package you installed after the base snapshot is carried over, so `/switch default` enables it and `/switch zen` turns it off.
 - A package you removed with `pi remove` is dropped, so switching never writes it back (pi would reinstall an `npm:` source during resolve).
 - A profile with neither `packages` nor `disablePackages` enables every known package. `packages` is a whitelist, `disablePackages` a blacklist; both accept partial matches such as `pi-lens` or `npm:pi-lens`.
 - This extension always keeps itself enabled. If a profile could switch itself off, there would be no way back except editing `settings.json`.

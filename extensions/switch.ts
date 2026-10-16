@@ -505,10 +505,36 @@ export function seedProfiles(): Record<string, Profile> {
       thinkingLevel: "low",
       tools: ["read", "bash", "edit", "write"],
     },
-    coder: {
+    default: {
       description: "Everything from the base snapshot (no overrides)",
     },
   };
+}
+
+/**
+ * Seeded profiles that were renamed. A store written by an older version keeps the old
+ * name, so it is migrated on load - but only the seeded shape (a description and nothing
+ * else), never a real profile the user built and happened to call `coder`.
+ */
+const LEGACY_SEED_PROFILES: Record<string, string> = { coder: "default" };
+
+export function migrateLegacyProfiles(profiles: Record<string, Profile>): {
+  profiles: Record<string, Profile>;
+  renamed: Array<{ from: string; to: string }>;
+} {
+  const out: Record<string, Profile> = { ...profiles };
+  const renamed: Array<{ from: string; to: string }> = [];
+  for (const [legacy, replacement] of Object.entries(LEGACY_SEED_PROFILES)) {
+    const entry = out[legacy];
+    if (entry === undefined) continue;
+    if (out[replacement] !== undefined) continue;
+    const overrides = Object.keys(entry).filter((key) => key !== "description");
+    if (overrides.length > 0) continue;
+    out[replacement] = entry;
+    delete out[legacy];
+    renamed.push({ from: legacy, to: replacement });
+  }
+  return { profiles: out, renamed };
 }
 
 export function storePath(agentDir: string, cwd: string): { global: string; project: string } {
@@ -523,14 +549,20 @@ export function loadStore(agentDir: string, cwd: string): Store {
   const globalStore = readJsonFile(paths.global) as Store | undefined;
   const projectStore = readJsonFile(paths.project) as Store | undefined;
 
+  const migrated = migrateLegacyProfiles({
+    ...(globalStore === undefined ? seedProfiles() : (globalStore.profiles ?? {})),
+    ...(projectStore?.profiles ?? {}),
+  });
+  const renamed = new Map(migrated.renamed.map(({ from, to }) => [from, to]));
+  const recordedActive = globalStore?.activeProfile;
+
   const store: Store = {
     version: 1,
     base: (globalStore?.base as ManagedSettings | undefined) ?? {},
-    activeProfile: globalStore?.activeProfile,
-    profiles: {
-      ...(globalStore === undefined ? seedProfiles() : (globalStore.profiles ?? {})),
-      ...(projectStore?.profiles ?? {}),
-    },
+    // An active profile that the migration renamed has to follow it, or the footer and
+    // drift detection would point at a profile that is no longer in the list.
+    activeProfile: recordedActive !== undefined && renamed.has(recordedActive) ? renamed.get(recordedActive) : recordedActive,
+    profiles: migrated.profiles,
     history: Array.isArray(globalStore?.history) ? globalStore.history : [],
   };
   if (!store.profiles[BASE_PROFILE_NAME]) {
@@ -573,6 +605,21 @@ export function profileNames(store: Store): string[] {
   });
 }
 
+/**
+ * Profiles worth showing. `base` is the snapshot every profile overlays, not something
+ * you pick from a list, so it stays out of the listing and the completion menu even
+ * though `/switch base` still works.
+ */
+export function switchableProfileNames(store: Store): string[] {
+  return profileNames(store).filter((name) => name !== BASE_PROFILE_NAME);
+}
+
+/** How an error should name the targets that would have worked. */
+export function knownProfilesHint(store: Store): string {
+  const named = switchableProfileNames(store);
+  return [...named, `${BASE_PROFILE_NAME} (the base snapshot)`].join(", ");
+}
+
 /* -------------------------------------------------------------------------- */
 /* Extension                                                                   */
 /* -------------------------------------------------------------------------- */
@@ -598,7 +645,7 @@ export default function (pi: ExtensionAPI): void {
     description: "Switch pi configuration profiles (packages, extensions, skills, themes) and reload",
     getArgumentCompletions: (argumentPrefix: string) => {
       const store = loadStore(agentDir, process.cwd());
-      const names = [...profileNames(store), ...SUBCOMMANDS.filter((s) => s !== "list")];
+      const names = [...switchableProfileNames(store), ...SUBCOMMANDS.filter((s) => s !== "list")];
       const prefix = (argumentPrefix ?? "").trim().toLowerCase();
       const items = names
         .filter((name) => name !== "help")
@@ -688,7 +735,7 @@ async function showProfile(
     resolved = resolveProfile(target, store.profiles);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(`/switch show: ${message}. Known profiles: ${profileNames(store).join(", ")}`, "error");
+    ctx.ui.notify(`/switch show: ${message}. Known profiles: ${knownProfilesHint(store)}`, "error");
     return;
   }
   const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot }, currentSettings);
@@ -768,7 +815,7 @@ function handleList(env: SwitchEnv): void {
   const lines = [
     `active profile: ${store.activeProfile ?? "(none)"}`,
     "",
-    ...profileNames(store).map((name) => {
+    ...switchableProfileNames(store).map((name) => {
       const description = store.profiles[name]?.description;
       return description ? `${name} - ${description}` : name;
     }),
@@ -932,7 +979,7 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
     resolved = resolveProfile(name, store.profiles);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const known = profileNames(store).join(", ");
+    const known = knownProfilesHint(store);
     ctx.ui.notify(`/switch: ${message}. Known profiles: ${known}`, "error");
     return;
   }

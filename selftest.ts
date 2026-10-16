@@ -17,6 +17,7 @@ import {
   isSelfPackageSource,
   mergePackageSets,
   loadStore,
+  migrateLegacyProfiles,
   type ManagedSettings,
   type PackageSource,
   type Profile,
@@ -228,9 +229,9 @@ check("a profile with nothing inheriting from it reports none", profilesExtendin
 
 /* ---------------- restore target ---------------- */
 
-check("restore does not re-activate a profile deleted since the switch", restoreActiveProfile("zen", { coder: {} }) === undefined);
-check("restore re-activates a profile that still exists", restoreActiveProfile("coder", { coder: {}, zen: {} }) === "coder");
-check("a switch with no previous profile restores to no profile", restoreActiveProfile(null, { coder: {} }) === undefined);
+check("restore does not re-activate a profile deleted since the switch", restoreActiveProfile("zen", { default: {} }) === undefined);
+check("restore re-activates a profile that still exists", restoreActiveProfile("default", { default: {}, zen: {} }) === "default");
+check("a switch with no previous profile restores to no profile", restoreActiveProfile(null, { default: {} }) === undefined);
 
 /* ---------------- settings build ---------------- */
 
@@ -268,9 +269,9 @@ const zenDrifted = buildProfileSettings(base, resolveProfile("zen", profiles).pr
 check("zen disables a package installed after the snapshot", (zenDrifted.packages ?? []).some((entry) => packageIsDisabled(entry) && packageSourceMatches(entry, "pi-brand-new")), zenDrifted.packages);
 check("zen still keeps itself enabled", (zenDrifted.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, "pi-switch-config")), zenDrifted.packages);
 
-const coderDrifted = buildProfileSettings(base, resolveProfile("coder", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, { ...base, packages: driftedCurrent });
-check("coder re-enables everything currently known", (coderDrifted.packages ?? []).every((entry) => !packageIsDisabled(entry)), coderDrifted.packages);
-check("coder does not resurrect a removed package", (coderDrifted.packages ?? []).some((entry) => packageSourceMatches(entry, "pi-web-access")) === false, coderDrifted.packages);
+const defaultDrifted = buildProfileSettings(base, resolveProfile("default", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, { ...base, packages: driftedCurrent });
+check("default re-enables everything currently known", (defaultDrifted.packages ?? []).every((entry) => !packageIsDisabled(entry)), defaultDrifted.packages);
+check("default does not resurrect a removed package", (defaultDrifted.packages ?? []).some((entry) => packageSourceMatches(entry, "pi-web-access")) === false, defaultDrifted.packages);
 
 /* ---------------- diff + summary ---------------- */
 
@@ -310,11 +311,11 @@ eq("undo restores theme", again.theme, "github-dark-default");
 eq("undo returns the zen snapshot", restored.theme, "system");
 check("undo removes a tool list the earlier profile wrote", (again as Record<string, unknown>).defaultTools === undefined, again);
 
-const coderAfterZen = buildProfileSettings(base, resolveProfile("coder", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, zenSettings);
+const defaultAfterZen = buildProfileSettings(base, resolveProfile("default", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, zenSettings);
 check(
   "a profile with no overrides clears what an earlier profile wrote",
-  coderAfterZen.defaultTools === undefined && coderAfterZen.theme === "github-dark-default" && coderAfterZen.defaultThinkingLevel === "medium",
-  coderAfterZen,
+  defaultAfterZen.defaultTools === undefined && defaultAfterZen.theme === "github-dark-default" && defaultAfterZen.defaultThinkingLevel === "medium",
+  defaultAfterZen,
 );
 
 const noBaseValue = buildProfileSettings(
@@ -340,6 +341,7 @@ mkdirSync(join(projectDir, ".pi"), { recursive: true });
 const emptyStore = loadStore(storeHome, projectDir);
 check("base profile always exists", emptyStore.profiles.base !== undefined);
 check("zen seeded", emptyStore.profiles.zen !== undefined);
+check("default seeded", emptyStore.profiles.default !== undefined && emptyStore.profiles.coder === undefined);
 
 check("ensureBase captures settings on a fresh store", ensureBase(emptyStore, base) === true && JSON.stringify(emptyStore.base) === JSON.stringify(base), emptyStore.base);
 check("ensureBase keeps an existing base", ensureBase(emptyStore, { theme: "other" }) === false && emptyStore.base.theme === base.theme, emptyStore.base);
@@ -394,6 +396,46 @@ writeFileSync(join(corruptHome, "pi-switch-config.json"), "{ not json", "utf8");
 const corruptStore = loadStore(corruptHome, tempDir());
 check("a corrupt store falls back to seed profiles instead of throwing", corruptStore.profiles.base !== undefined && corruptStore.profiles.zen !== undefined, Object.keys(corruptStore.profiles));
 check("a corrupt store keeps no active profile or history", corruptStore.activeProfile === undefined && corruptStore.history.length === 0, corruptStore);
+
+/* ---------------- legacy seed rename: coder -> default ---------------- */
+
+const legacyHome = tempDir();
+writeFileSync(join(legacyHome, "pi-switch-config.json"), JSON.stringify({
+  version: 1,
+  base: { theme: "github-dark-default" },
+  activeProfile: "coder",
+  profiles: { base: { description: "base" }, zen: { theme: "system" }, coder: { description: "Everything from the base snapshot (no overrides)" } },
+  history: [],
+}), "utf8");
+const migratedStore = loadStore(legacyHome, tempDir());
+check("the legacy seed profile is renamed on load", migratedStore.profiles.default !== undefined && migratedStore.profiles.coder === undefined, Object.keys(migratedStore.profiles));
+check("the active profile follows the rename", migratedStore.activeProfile === "default", migratedStore.activeProfile);
+
+const customHome = tempDir();
+writeFileSync(join(customHome, "pi-switch-config.json"), JSON.stringify({
+  version: 1,
+  base: {},
+  profiles: { coder: { description: "mine", theme: "dracula" } },
+  history: [],
+}), "utf8");
+const customStore = loadStore(customHome, tempDir());
+check("a real profile the user named coder is left alone", customStore.profiles.coder?.theme === "dracula" && customStore.profiles.default === undefined, customStore.profiles);
+
+const clashHome = tempDir();
+writeFileSync(join(clashHome, "pi-switch-config.json"), JSON.stringify({
+  version: 1,
+  base: {},
+  profiles: { coder: { description: "Everything from the base snapshot (no overrides)" }, default: { theme: "solarized" } },
+  history: [],
+}), "utf8");
+const clashStore = loadStore(clashHome, tempDir());
+check("the rename never overwrites a profile the user already made", clashStore.profiles.default?.theme === "solarized" && clashStore.profiles.coder !== undefined, clashStore.profiles);
+
+check(
+  "migration reports what it renamed",
+  JSON.stringify(migrateLegacyProfiles({ coder: { description: "x" } }).renamed) === JSON.stringify([{ from: "coder", to: "default" }]),
+  migrateLegacyProfiles({ coder: { description: "x" } }).renamed,
+);
 
 /* ---------------- unparseable files are kept, not overwritten ---------------- */
 
