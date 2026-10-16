@@ -3,19 +3,24 @@
  * Run with: npm test  (node --experimental-strip-types selftest.ts)
  */
 
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   applyPackagePolicy,
   buildProfileSettings,
+  buildResourceSetting,
   captureManagedSettings,
+  captureResourceWhitelist,
+  collectResourceCandidates,
   defaultConfiguration,
   diffSettings,
   detectDrift,
   ensureBase,
+  isBaselineProfile,
   isSelfPackageSource,
+  legacyResourceToWhitelist,
   LEGACY_STORE_FILE_NAME,
   mergePackageSets,
   loadStore,
@@ -239,7 +244,7 @@ check("packageIsDisabled reads autoload", packageIsDisabled({ source: "npm:x", a
 
 const profiles = {
   ...seedProfiles(),
-  parent: { description: "parent", theme: "dracula", skills: ["!skills/**"] },
+  parent: { description: "parent", theme: "dracula", skills: [] },
   child: { extends: "parent", theme: "system", tools: ["read"] },
   loopA: { extends: "loopB" },
   loopB: { extends: "loopA" },
@@ -247,13 +252,13 @@ const profiles = {
 
 const zen = resolveProfile("zen", profiles).profile;
 check("zen disables packages", zen.packages !== undefined && zen.packages.length === 0);
-check("zen disables auto-discovered skills", zen.skills?.includes("!skills/**") === true);
-check("zen disables built-in extras", zen.extensions?.includes("-builtin:mcp") === true);
+check("zen disables auto-discovered skills", JSON.stringify(zen.skills) === JSON.stringify([]), zen.skills);
+check("zen disables every extension including built-ins", JSON.stringify(zen.extensions) === JSON.stringify([]), zen.extensions);
 
 const child = resolveProfile("child", profiles).profile;
 eq("extends merges parent", { theme: child.theme, skills: child.skills, tools: child.tools }, {
   theme: "system",
-  skills: ["!skills/**"],
+  skills: [],
   tools: ["read"],
 });
 
@@ -308,6 +313,107 @@ eq("zen thinking", zenSettings.defaultThinkingLevel, "low");
 eq("zen tools", zenSettings.defaultTools, ["read", "bash", "edit", "write"]);
 eq("zen keeps base model", { provider: zenSettings.defaultProvider, model: zenSettings.defaultModel }, { provider: "strata", model: "qwen3.8-flash-next" });
 check("zen clears prompts", zenSettings.prompts?.includes("!prompts/**") === true, zenSettings.prompts);
+check("zen disables built-in extras in the settings it writes", zenSettings.extensions?.includes("-builtin:mcp") === true, zenSettings.extensions);
+
+/* ---------------- resource whitelists ---------------- */
+
+const fixtureDir = join(import.meta.dirname, ".tmp-whitelist");
+rmSync(fixtureDir, { recursive: true, force: true });
+mkdirSync(join(fixtureDir, "extensions"), { recursive: true });
+mkdirSync(join(fixtureDir, "skills/novel-writer"), { recursive: true });
+mkdirSync(join(fixtureDir, "skills/archive"), { recursive: true });
+mkdirSync(join(fixtureDir, "prompts"), { recursive: true });
+writeFileSync(join(fixtureDir, "extensions/review.ts"), "",
+  "utf8");
+writeFileSync(join(fixtureDir, "extensions/pi-lens-tools.ts"), "", "utf8");
+writeFileSync(join(fixtureDir, "skills/novel-writer/SKILL.md"), "", "utf8");
+writeFileSync(join(fixtureDir, "skills/archive/SKILL.md"), "", "utf8");
+writeFileSync(join(fixtureDir, "prompts/notes.md"), "", "utf8");
+
+const fixtureCandidates = collectResourceCandidates(fixtureDir, fixtureDir);
+// ~/.agents/skills is always scanned, so the expected set is the fixture plus whatever the
+// machine has there (measured with an empty fixture).
+const agentsOnly = collectResourceCandidates(mkdtempSync(join(tmpdir(), "pi-switch-empty-")), fixtureDir);
+const expectedCandidates = [
+  "extensions:extensions/pi-lens-tools.ts",
+  "extensions:extensions/review.ts",
+  "skills:skills/archive",
+  "skills:skills/novel-writer",
+  "prompts:prompts/notes.md",
+  ...agentsOnly.map((c) => `${c.kind}:${c.rel}`),
+];
+check(
+  "candidates list the auto-discoverable resources",
+  JSON.stringify(fixtureCandidates.map((c) => `${c.kind}:${c.rel}`)) === JSON.stringify([...new Set(expectedCandidates)]),
+  fixtureCandidates,
+);
+check(
+  "a whitelist keeps the matches and denies the rest",
+  JSON.stringify(buildResourceSetting("extensions", ["review"], fixtureCandidates)) === JSON.stringify([
+    "!extensions/**",
+    "-builtin:llama.cpp",
+    "-builtin:codemode",
+    "-builtin:tool-search",
+    "-builtin:mcp",
+    "+extensions/review.ts",
+  ]),
+  buildResourceSetting("extensions", ["review"], fixtureCandidates),
+);
+check(
+  "a built-in is kept by naming it",
+  buildResourceSetting("extensions", ["builtin:mcp"], fixtureCandidates).includes("+builtin:mcp"),
+  buildResourceSetting("extensions", ["builtin:mcp"], fixtureCandidates),
+);
+check(
+  "globs match too",
+  JSON.stringify(buildResourceSetting("skills", ["skills/nov*"], fixtureCandidates)) === JSON.stringify(["!skills/**", "+skills/novel-writer"]),
+  buildResourceSetting("skills", ["skills/nov*"], fixtureCandidates),
+);
+check("an empty whitelist keeps nothing", JSON.stringify(buildResourceSetting("prompts", [], fixtureCandidates)) === JSON.stringify(["!prompts/**"]));
+check(
+  "capture turns an existing filter list back into a whitelist",
+  JSON.stringify(captureResourceWhitelist("skills", ["!skills/**", "+skills/novel-writer"], fixtureCandidates)) === JSON.stringify(["skills/novel-writer"]),
+  captureResourceWhitelist("skills", ["!skills/**", "+skills/novel-writer"], fixtureCandidates),
+);
+check(
+  "a legacy deny-only list migrates to an empty whitelist",
+  JSON.stringify(legacyResourceToWhitelist(["!extensions/**", "-builtin:mcp"])) === JSON.stringify([]),
+  legacyResourceToWhitelist(["!extensions/**", "-builtin:mcp"]),
+);
+check(
+  "a legacy force-include list migrates to those paths",
+  JSON.stringify(legacyResourceToWhitelist(["!extensions/**", "+extensions/review.ts"])) === JSON.stringify(["extensions/review.ts"]),
+  legacyResourceToWhitelist(["!extensions/**", "+extensions/review.ts"]),
+);
+check("a whitelist is left alone by migration", JSON.stringify(legacyResourceToWhitelist(["review"])) === JSON.stringify(["review"]));
+check("base is a baseline profile", isBaselineProfile("base", {}) === true);
+check("a default with no resource overrides is a baseline profile", isBaselineProfile("default", { theme: "x" }) === true);
+check("a default that narrows resources is not", isBaselineProfile("default", { extensions: [] }) === false);
+check("any other profile starts from nothing", isBaselineProfile("review", {}) === false);
+
+const whitelistOptions = { settingsBaseDir: fixtureDir, packageRoot, cwd: fixtureDir, profileName: "review" };
+const reviewProfile = buildProfileSettings(base, { extensions: ["review"], skills: ["novel"] }, whitelistOptions, base);
+check(
+  "a profile that declares only some keys still starts from nothing for the rest",
+  JSON.stringify(reviewProfile.themes) === JSON.stringify(["!themes/**"]),
+  reviewProfile.themes,
+);
+check(
+  "a declared whitelist filters the auto-discovered resources",
+  JSON.stringify(reviewProfile.extensions) === JSON.stringify(["!extensions/**", "-builtin:llama.cpp", "-builtin:codemode", "-builtin:tool-search", "-builtin:mcp", "+extensions/review.ts"]),
+  reviewProfile.extensions,
+);
+check(
+  "a whitelist profile keeps its skills",
+  JSON.stringify(reviewProfile.skills) === JSON.stringify(["!skills/**", "+skills/novel-writer"]),
+  reviewProfile.skills,
+);
+const defaultApplied = buildProfileSettings(base, {}, { ...whitelistOptions, profileName: "default" }, base);
+eq("the default profile keeps the base resources", { extensions: defaultApplied.extensions, skills: defaultApplied.skills }, { extensions: base.extensions, skills: base.skills });
+const plainApplied = buildProfileSettings(base, {}, whitelistOptions, base);
+check("a non-baseline profile with no overrides empties the resources", plainApplied.themes?.includes("!themes/**") === true, plainApplied.themes);
+check("and clears the ones base had", plainApplied.extensions?.includes("!extensions/**") === true && plainApplied.skills?.includes("!skills/**") === true, plainApplied);
+rmSync(fixtureDir, { recursive: true, force: true });
 
 const modelProfile = buildProfileSettings(base, { model: "anthropic/claude-sonnet-4-5" }, { settingsBaseDir: agentDir, packageRoot }, base);
 eq("profile model overrides provider and model", { provider: modelProfile.defaultProvider, model: modelProfile.defaultModel }, {
@@ -589,14 +695,25 @@ check("a parseable file is never copied aside", existsSync(`${goodSettings}.corr
 
 /* ---------------- save round trip ---------------- */
 
+const fixtureSaveDir = join(import.meta.dirname, ".tmp-save");
+rmSync(fixtureSaveDir, { recursive: true, force: true });
+mkdirSync(join(fixtureSaveDir, "extensions"), { recursive: true });
+mkdirSync(join(fixtureSaveDir, "skills/novel-writer"), { recursive: true });
+mkdirSync(join(fixtureSaveDir, "skills/archive"), { recursive: true });
+writeFileSync(join(fixtureSaveDir, "extensions/review.ts"), "", "utf8");
+writeFileSync(join(fixtureSaveDir, "skills/novel-writer/SKILL.md"), "", "utf8");
+writeFileSync(join(fixtureSaveDir, "skills/archive/SKILL.md"), "", "utf8");
+
 const saved = profileFromSettings({
   packages: ["npm:pi-lens", { source: "npm:pi-off", autoload: false }, "npm:pi-switch-profile"],
+  extensions: ["!extensions/**", "+extensions/review.ts"],
+  skills: ["!skills/**", "+skills/novel-writer"],
   theme: "solarized",
   defaultTools: ["read"],
   defaultThinkingLevel: "high",
   defaultProvider: "strata",
   defaultModel: "qwen3.8-flash-next",
-});
+}, fixtureSaveDir, fixtureSaveDir);
 check(
   "save records only enabled packages",
   JSON.stringify(saved.packages) === JSON.stringify(["npm:pi-lens", "npm:pi-switch-profile"]),
@@ -608,6 +725,15 @@ check(
   saved,
 );
 check("save records the model as a profile spec", saved.model === "strata/qwen3.8-flash-next", saved.model);
+check(
+  "save records a whitelist of what was enabled",
+  JSON.stringify({ extensions: saved.extensions, skills: saved.skills }) === JSON.stringify({
+    extensions: ["builtin:codemode", "builtin:llama.cpp", "builtin:mcp", "builtin:tool-search", "extensions/review.ts"],
+    skills: ["skills/novel-writer"],
+  }),
+  { extensions: saved.extensions, skills: saved.skills },
+);
+rmSync(fixtureSaveDir, { recursive: true, force: true });
 
 const savedApplied = buildProfileSettings(base, saved, driftOptions, base);
 check(

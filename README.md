@@ -9,6 +9,7 @@ Use it to move between a stripped-down session and a fully equipped one without 
 ## Features
 
 - **One command, full swap.** `/switch zen` turns off skills, extensions, prompt templates, and custom themes; `/switch default` turns them back on.
+- **Whitelists, not exclusions.** A profile lists what to keep (`"skills": ["novel-writer"]`) and everything else is off - no `!extensions/**` patterns to write.
 - **Nothing is uninstalled.** Profiles overlay a captured *base* snapshot of `settings.json`. A disabled pi package becomes `{ "source": "...", "autoload": false }` instead of disappearing, so re-enabling it is instant.
 - **Never locks itself out.** The extension keeps its own package enabled even in the strictest profile.
 - **Undo.** Every switch records the settings it replaced; `/switch restore` puts them back.
@@ -71,18 +72,20 @@ Profiles live in `~/.pi/agent/pi-switch-profile.json`, with optional project pro
     "zen": {
       "description": "Zero skills, zero extensions",
       "packages": [],
-      "extensions": ["!extensions/**", "-builtin:mcp", "-builtin:codemode", "-builtin:tool-search"],
-      "skills": ["!skills/**"],
-      "prompts": ["!prompts/**"],
-      "themes": ["!themes/**"],
+      "extensions": [],
+      "skills": [],
+      "prompts": [],
+      "themes": [],
       "theme": "system",
       "thinkingLevel": "low",
       "tools": ["read", "bash", "edit", "write"]
     },
     "review": {
       "extends": "zen",
-      "description": "Zen plus one review extension",
-      "packages": ["pi-simplify"]
+      "description": "Zen plus one review extension and one skill",
+      "packages": ["pi-simplify"],
+      "extensions": ["review", "builtin:mcp"],
+      "skills": ["novel-writer"]
     }
   }
 }
@@ -94,7 +97,7 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 | --- | --- | --- |
 | `packages` | `packages` | Whitelist of package sources to keep enabled (substring match, for example `pi-lens` matches `npm:pi-lens`). Everything else in `base` gets `autoload: false`. This extension is always kept. |
 | `disablePackages` | `packages` | Blacklist of package sources to disable; all others stay as they are. |
-| `extensions`, `skills`, `prompts`, `themes` | same | Replace the list. pi's `!pattern`, `+path`, and `-path` entries work, so `!skills/**` turns off auto-discovered resources. |
+| `extensions`, `skills`, `prompts`, `themes` | same | **Whitelist** of what to keep: a term is a substring (`review`, `novel-writer`) or a glob (`extensions/review.ts`, `skills/nov*`). Everything that matches nothing is disabled, so `[]` means "none" and you never write an exclusion pattern. See [Resource whitelists](#resource-whitelists). |
 | `theme` | `theme` | Theme name, for example `system`, `dracula`, or a custom theme name. |
 | `model` | `defaultProvider`, `defaultModel` | `provider/modelId` or a bare `modelId`. Applied to the live session after the reload as well. |
 | `thinkingLevel` | `defaultThinkingLevel` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Also applied to the live session. |
@@ -103,6 +106,29 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 
 Store options, not per-profile: `revertSession` (`"start" | "end" | "off"`, default `"start"`) decides when the session
 returns to the default configuration; see [Reverting to the default configuration](#reverting-to-the-default-configuration).
+
+### Resource whitelists
+
+A profile starts from nothing. If it declares `extensions`, it keeps only the extensions its terms
+match, and the skills, prompts, and themes it does not mention are switched off too - so a profile is
+a list of what you want, not a list of what to exclude.
+
+Two profiles are the exception because they mean "everything you have": `base`, and a `default` you
+gave no resource overrides to. That is why `/switch default` still turns everything back on.
+
+- Terms are matched against the resources pi auto-discovers: `~/.pi/agent/extensions|skills|prompts|themes`,
+  `~/.agents/skills`, and the project's `.pi/` equivalents. A skill is matched by its directory name
+  (`novel-writer`), a file by name or path.
+- pi's own built-in extensions (`mcp`, `codemode`, `tool-search`, `llama.cpp`) are not under
+  `extensions/**`, so a whitelist names them: `builtin:mcp` keeps it, leaving it out drops it.
+- Resources a *package* provides follow the `packages` whitelist instead, because pi filters those with
+  the package entry's own filter. To keep a package's extension, keep the package.
+- The settings written are still plain pi entries (`!extensions/**` plus `+extensions/review.ts` for each
+  match), so `settings.json` stays readable and editable by hand; `/switch` just generates them.
+- `/switch save <name>` records the currently enabled resources as a whitelist, so a saved profile
+  reproduces what you had.
+- Profiles written by older versions (lists of `!pattern`, `+path`, `-path`) are migrated on load: the
+  entries that were being kept become the whitelist, and a list that only denied things becomes `[]`.
 
 ### Base, save, and refresh
 

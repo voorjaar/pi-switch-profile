@@ -15,7 +15,7 @@
  * without loading the pi runtime.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -57,7 +57,13 @@ export interface Profile {
   packages?: string[];
   /** Disable these package sources (substring match). */
   disablePackages?: string[];
-  /** Replace the settings.extensions list. Supports pi's `!pattern`, `+path`, `-path` entries. */
+  /**
+   * Whitelist of extensions to keep: a term is a substring (for example `pi-lens`) or a glob
+   * (`extensions/review.ts`, `skills/nov*`). A built-in is kept by naming it (`builtin:mcp`).
+   * Anything that matches nothing is disabled, so an empty list means "no extensions". A
+   * profile that does not declare the key starts from nothing too, except the baseline
+   * profiles (`base`, and a `default` with no overrides), which keep everything.
+   */
   extensions?: string[];
   skills?: string[];
   prompts?: string[];
@@ -357,6 +363,208 @@ export function applyPackagePolicy(
   });
 }
 
+/* -------------------------------------------------------------------------- */
+/* Resource whitelists                                                         */
+/* -------------------------------------------------------------------------- */
+
+export const RESOURCE_KINDS = ["extensions", "skills", "prompts", "themes"] as const;
+export type ResourceKind = (typeof RESOURCE_KINDS)[number];
+
+/**
+ * pi's own built-in extensions. They are enabled unless a settings entry excludes them, so a
+ * whitelist has to name each one it wants. Read from pi 1.2.0's built-in extension list.
+ */
+export const BUILTIN_EXTENSION_NAMES = ["llama.cpp", "codemode", "tool-search", "mcp"];
+
+export interface ResourceCandidate {
+  kind: ResourceKind;
+  /** Path relative to the directory pi auto-discovers it from, for example `skills/novel-writer`. */
+  rel: string;
+}
+
+function globToRegExp(glob: string): RegExp {
+  let out = "";
+  for (let i = 0; i < glob.length; i += 1) {
+    const char = glob[i];
+    if (char === "*") {
+      if (glob[i + 1] === "*") {
+        out += ".*";
+        i += 1;
+        if (glob[i + 1] === "/") i += 1;
+      } else {
+        out += "[^/]*";
+      }
+      continue;
+    }
+    if (char === "?") {
+      out += "[^/]";
+      continue;
+    }
+    out += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/** A whitelist term against one candidate path: substring, basename, or glob. */
+export function resourceTermMatches(rel: string, term: string): boolean {
+  const cleaned = term.replace(/^\+/, "").replace(/^\.\/+/, "").split("\\").join("/").trim();
+  if (cleaned.length === 0 || cleaned.startsWith("builtin:")) return false;
+  const relName = rel.split("/").pop() ?? rel;
+  if (/[*?]/.test(cleaned)) {
+    const pattern = globToRegExp(cleaned);
+    return pattern.test(rel) || pattern.test(relName);
+  }
+  const lowered = cleaned.toLowerCase();
+  return rel.toLowerCase().includes(lowered) || relName.toLowerCase().includes(lowered);
+}
+
+function builtinTermMatches(term: string, name: string): boolean {
+  const cleaned = term.replace(/^\+/, "").trim().toLowerCase();
+  const bare = cleaned.startsWith("builtin:") ? cleaned.slice("builtin:".length) : cleaned;
+  return bare === name.toLowerCase();
+}
+
+function listKindCandidates(baseDir: string, kind: ResourceKind): string[] {
+  const out: string[] = [];
+  const dir = join(baseDir, kind);
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    const rel = `${kind}/${entry.name}`;
+    if (entry.isDirectory()) {
+      if (kind === "skills") {
+        const self = join(dir, entry.name);
+        if (existsSync(join(self, "SKILL.md"))) {
+          out.push(rel);
+          continue;
+        }
+        let nested;
+        try {
+          nested = readdirSync(self, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const sub of nested) {
+          if (sub.isDirectory() && existsSync(join(self, sub.name, "SKILL.md"))) out.push(`${rel}/${sub.name}`);
+        }
+      } else if (kind === "extensions") {
+        // A directory extension is a package-style extension.
+        out.push(rel);
+      }
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (kind === "extensions" && /\.(c|m)?(ts|js)$/i.test(entry.name)) out.push(rel);
+    else if (kind === "prompts" && entry.name.endsWith(".md")) out.push(rel);
+    else if (kind === "themes" && entry.name.endsWith(".json")) out.push(rel);
+  }
+  return out;
+}
+
+/**
+ * The resources pi auto-discovers: the agent dir, `~/.agents/skills`, and the project's `.pi`
+ * dir. Package-provided resources are not listed - those follow the package whitelist, because
+ * pi filters them with the package entry's own filter.
+ */
+export function collectResourceCandidates(agentDir: string, cwd: string): ResourceCandidate[] {
+  const bases: Array<{ dir: string; kinds: readonly ResourceKind[] }> = [
+    { dir: agentDir, kinds: RESOURCE_KINDS },
+    { dir: join(homedir(), ".agents"), kinds: ["skills"] },
+    { dir: join(cwd, PROJECT_DIR_NAME), kinds: RESOURCE_KINDS },
+  ];
+  const out: ResourceCandidate[] = [];
+  const seen = new Set<string>();
+  for (const base of bases) {
+    for (const kind of base.kinds) {
+      for (const rel of listKindCandidates(base.dir, kind)) {
+        const key = `${kind}:${rel}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ kind, rel });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Turn a whitelist into the settings entries pi understands: deny the whole auto-discovered
+ * tree, then force-include the matches (pi applies `+path` after `!pattern`). Built-ins are
+ * named one by one because they are not under `extensions/**`.
+ */
+export function buildResourceSetting(kind: ResourceKind, whitelist: string[], candidates: ResourceCandidate[]): string[] {
+  const entries: string[] = [`!${kind}/**`];
+  if (kind === "extensions") {
+    for (const name of BUILTIN_EXTENSION_NAMES) {
+      entries.push(whitelist.some((term) => builtinTermMatches(term, name)) ? `+builtin:${name}` : `-builtin:${name}`);
+    }
+  }
+  const included = new Set<string>();
+  for (const candidate of candidates) {
+    if (candidate.kind !== kind) continue;
+    if (whitelist.some((term) => resourceTermMatches(candidate.rel, term))) included.add(candidate.rel);
+  }
+  for (const rel of [...included].sort()) entries.push(`+${rel}`);
+  return entries;
+}
+
+/** Whether a candidate survives a settings filter list, mirroring pi's override order. */
+export function resourceFiltersAllow(rel: string, filters: string[] | undefined): boolean {
+  const list = filters ?? [];
+  const excludes = list.filter((entry) => entry.startsWith("!")).map((entry) => entry.slice(1));
+  const forceIncludes = list.filter((entry) => entry.startsWith("+")).map((entry) => entry.slice(1));
+  const forceExcludes = list.filter((entry) => entry.startsWith("-")).map((entry) => entry.slice(1));
+  let enabled = true;
+  if (excludes.some((pattern) => resourceTermMatches(rel, pattern))) enabled = false;
+  if (forceIncludes.some((path) => path === rel || resourceTermMatches(rel, path))) enabled = true;
+  if (forceExcludes.some((path) => path === rel || resourceTermMatches(rel, path))) enabled = false;
+  return enabled;
+}
+
+/** The whitelist that reproduces an existing settings filter list over these candidates. */
+export function captureResourceWhitelist(kind: ResourceKind, filters: string[] | undefined, candidates: ResourceCandidate[]): string[] {
+  const terms: string[] = [];
+  for (const candidate of candidates) {
+    if (candidate.kind === kind && resourceFiltersAllow(candidate.rel, filters)) terms.push(candidate.rel);
+  }
+  if (kind === "extensions") {
+    for (const name of BUILTIN_EXTENSION_NAMES) {
+      if (resourceFiltersAllow(`builtin:${name}`, filters)) terms.push(`builtin:${name}`);
+    }
+  }
+  return terms.sort();
+}
+
+/**
+ * A profile list written under the older filter semantics (`!pattern`, `+path`, `-path`)
+ * becomes a whitelist: the force-includes and plain entries are what it was keeping, and a
+ * list that only denied things keeps nothing.
+ */
+export function legacyResourceToWhitelist(entries: string[] | undefined): string[] | undefined {
+  if (entries === undefined) return undefined;
+  if (!entries.some((entry) => entry.startsWith("!") || entry.startsWith("+") || entry.startsWith("-"))) return entries;
+  const terms: string[] = [];
+  for (const entry of entries) {
+    if (entry.startsWith("!") || entry.startsWith("-")) continue;
+    terms.push(entry.startsWith("+") ? entry.slice(1) : entry);
+  }
+  return terms;
+}
+
+/**
+ * `base`, and a `default` the user gave no resource overrides to, mean "everything that is
+ * installed". Every other profile starts from nothing.
+ */
+export function isBaselineProfile(name: string, profile: Profile): boolean {
+  if (name === BASE_PROFILE_NAME) return true;
+  if (name === DEFAULT_PROFILE_NAME) return RESOURCE_KINDS.every((kind) => profile[kind] === undefined);
+  return false;
+}
+
 export function parseModelSpec(spec: string): { provider?: string; modelId: string } {
   const trimmed = spec.trim();
   const slash = trimmed.indexOf("/");
@@ -402,7 +610,7 @@ function mergeProfileOverlay(target: ManagedSettings & Profile, profile: Profile
 export function buildProfileSettings(
   base: ManagedSettings,
   profile: Profile,
-  options: { settingsBaseDir: string; packageRoot: string },
+  options: { settingsBaseDir: string; packageRoot: string; cwd?: string; profileName?: string },
   currentSettings: ManagedSettings | undefined,
 ): ManagedSettings {
   const current = currentSettings ?? {};
@@ -412,10 +620,18 @@ export function buildProfileSettings(
   // mergePackageSets) because pi install/remove change them out of band; every other
   // managed key comes from the profile or the snapshot, so a key neither defines is
   // cleared rather than left holding an earlier profile's value.
-  next.extensions = profile.extensions ?? base.extensions;
-  next.skills = profile.skills ?? base.skills;
-  next.prompts = profile.prompts ?? base.prompts;
-  next.themes = profile.themes ?? base.themes;
+  //
+  // Resource keys are whitelists: a profile starts from nothing and lists what it keeps.
+  // Only the baseline profiles (base, and a default with no resource overrides) keep
+  // everything the snapshot has.
+  const candidates = options.cwd !== undefined ? collectResourceCandidates(options.settingsBaseDir, options.cwd) : [];
+  const baseline = options.profileName === undefined || isBaselineProfile(options.profileName, profile);
+  for (const kind of RESOURCE_KINDS) {
+    const declared = profile[kind];
+    if (declared !== undefined) next[kind] = buildResourceSetting(kind, declared, candidates);
+    else if (baseline) next[kind] = base[kind];
+    else next[kind] = buildResourceSetting(kind, [], candidates);
+  }
   next.theme = profile.theme ?? base.theme;
   next.defaultThinkingLevel = profile.thinkingLevel ?? base.defaultThinkingLevel;
   next.defaultTools = profile.tools ?? base.defaultTools;
@@ -493,7 +709,7 @@ function formatValue(value: unknown): string {
 export function detectDrift(
   store: Store,
   currentSettings: ManagedSettings,
-  options: { settingsBaseDir: string; packageRoot: string },
+  options: { settingsBaseDir: string; packageRoot: string; cwd?: string },
 ): { profile: string; changes: string[] } | undefined {
   if (store.activeProfile === undefined) return undefined;
   let resolved: { profile: Profile; chain: string[] };
@@ -502,7 +718,7 @@ export function detectDrift(
   } catch {
     return undefined;
   }
-  const expected = buildProfileSettings(store.base, resolved.profile, options, currentSettings);
+  const expected = buildProfileSettings(store.base, resolved.profile, { ...options, profileName: store.activeProfile }, currentSettings);
   const changes = diffSettings(currentSettings, expected);
   if (changes.length === 0) return undefined;
   return { profile: store.activeProfile, changes };
@@ -517,10 +733,10 @@ export function seedProfiles(): Record<string, Profile> {
     zen: {
       description: "Zero skills, zero extensions: pi packages off, auto-discovered resources off, built-in extras off",
       packages: [],
-      extensions: ["!extensions/**", "-builtin:mcp", "-builtin:llama.cpp", "-builtin:codemode", "-builtin:tool-search"],
-      skills: ["!skills/**"],
-      prompts: ["!prompts/**"],
-      themes: ["!themes/**"],
+      extensions: [],
+      skills: [],
+      prompts: [],
+      themes: [],
       theme: "system",
       thinkingLevel: "low",
       tools: ["read", "bash", "edit", "write"],
@@ -553,6 +769,15 @@ export function migrateLegacyProfiles(profiles: Record<string, Profile>): {
     out[replacement] = entry;
     delete out[legacy];
     renamed.push({ from: legacy, to: replacement });
+  }
+  // Profiles written under the older filter semantics keep meaning the same thing: their
+  // `!pattern` / `+path` / `-path` lists become the whitelist of what they were keeping.
+  for (const [name, profile] of Object.entries(out)) {
+    for (const kind of RESOURCE_KINDS) {
+      const converted = legacyResourceToWhitelist(profile[kind]);
+      if (converted !== undefined) profile[kind] = converted;
+    }
+    out[name] = profile;
   }
   return { profiles: out, renamed };
 }
@@ -839,7 +1064,7 @@ async function showProfile(
     ctx.ui.notify(`/switch show: ${message}. Known profiles: ${knownProfilesHint(store)}`, "error");
     return;
   }
-  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot }, currentSettings);
+  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot, cwd: ctx.cwd, profileName: target }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
   const lines = [
     `profile: ${resolved.chain.join(" + ") || BASE_PROFILE_NAME}`,
@@ -929,7 +1154,7 @@ function handleList(env: SwitchEnv): void {
     "",
     `revert session: ${store.revertSession ?? "start"}`,
   ];
-  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot });
+  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot, cwd: env.ctx.cwd });
   if (drift !== undefined) {
     lines.push(
       "",
@@ -953,7 +1178,7 @@ function handleDoctor(env: SwitchEnv): void {
     `active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`,
     `configured tools (${configuredTools.length}): ${configuredTools.map((tool) => tool.name).join(", ") || "(none)"}`,
   ];
-  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot });
+  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot, cwd: env.ctx.cwd });
   if (drift !== undefined) {
     lines.push("", `Settings differ from profile "${drift.profile}":`, ...drift.changes.map((change) => `  ${change}`));
   } else if (store.activeProfile !== undefined) {
@@ -1019,10 +1244,11 @@ export function parseRevertSessionMode(store: Store | Record<string, unknown> | 
 export function defaultConfiguration(
   store: Store,
   currentSettings: ManagedSettings,
-  options: { settingsBaseDir: string; packageRoot: string },
+  options: { settingsBaseDir: string; packageRoot: string; cwd?: string },
 ): ManagedSettings {
-  const profile = store.profiles[DEFAULT_PROFILE_NAME] !== undefined ? resolveProfile(DEFAULT_PROFILE_NAME, store.profiles).profile : {};
-  return buildProfileSettings(store.base, profile, options, currentSettings);
+  const hasDefault = store.profiles[DEFAULT_PROFILE_NAME] !== undefined;
+  const profile = hasDefault ? resolveProfile(DEFAULT_PROFILE_NAME, store.profiles).profile : {};
+  return buildProfileSettings(store.base, profile, { ...options, profileName: hasDefault ? DEFAULT_PROFILE_NAME : BASE_PROFILE_NAME }, currentSettings);
 }
 
 /**
@@ -1033,7 +1259,7 @@ export function defaultConfiguration(
 export function planSessionRevert(
   store: Store,
   currentSettings: ManagedSettings,
-  options: { settingsBaseDir: string; packageRoot: string },
+  options: { settingsBaseDir: string; packageRoot: string; cwd?: string },
   point: "start" | "end",
 ): { settings: ManagedSettings; changes: string[]; profileLabel: string } | undefined {
   const mode = store.revertSession ?? "start";
@@ -1098,7 +1324,7 @@ function applySessionRevert(
   const store = loadStore(agentDir, cwd);
   const settingsPath = join(agentDir, SETTINGS_FILE_NAME);
   const currentSettings = captureManagedSettings(readJsonFile(settingsPath));
-  const plan = planSessionRevert(store, currentSettings, { settingsBaseDir: agentDir, packageRoot }, point);
+  const plan = planSessionRevert(store, currentSettings, { settingsBaseDir: agentDir, packageRoot, cwd }, point);
   if (plan === undefined) return undefined;
 
   const at = new Date().toISOString();
@@ -1151,7 +1377,7 @@ function handleSave(env: SwitchEnv, name: string | undefined): void {
     return;
   }
   const overwriting = store.profiles[name] !== undefined;
-  store.profiles[name] = profileFromSettings(currentSettings);
+  store.profiles[name] = profileFromSettings(currentSettings, env.agentDir, ctx.cwd);
   saveStore(store, env.agentDir);
   ctx.ui.notify(
     overwriting
@@ -1161,17 +1387,22 @@ function handleSave(env: SwitchEnv, name: string | undefined): void {
   );
 }
 
-export function profileFromSettings(currentSettings: ManagedSettings): Profile {
+export function profileFromSettings(
+  currentSettings: ManagedSettings,
+  agentDir: string,
+  cwd: string,
+): Profile {
   const enabledPackages = (currentSettings.packages ?? [])
     .filter((entry) => !packageIsDisabled(entry))
     .map(packageSourceString);
+  const candidates = collectResourceCandidates(agentDir, cwd);
   return {
     description: `Saved ${new Date().toISOString()}`,
     packages: enabledPackages,
-    extensions: currentSettings.extensions,
-    skills: currentSettings.skills,
-    prompts: currentSettings.prompts,
-    themes: currentSettings.themes,
+    extensions: captureResourceWhitelist("extensions", currentSettings.extensions, candidates),
+    skills: captureResourceWhitelist("skills", currentSettings.skills, candidates),
+    prompts: captureResourceWhitelist("prompts", currentSettings.prompts, candidates),
+    themes: captureResourceWhitelist("themes", currentSettings.themes, candidates),
     theme: currentSettings.theme,
     thinkingLevel: currentSettings.defaultThinkingLevel as Profile["thinkingLevel"],
     tools: currentSettings.defaultTools,
@@ -1231,6 +1462,8 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
   const nextSettings = buildProfileSettings(store.base, resolved.profile, {
     settingsBaseDir: env.agentDir,
     packageRoot: env.packageRoot,
+    cwd: ctx.cwd,
+    profileName: name,
   }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
   if (store.revertSession !== "off") {

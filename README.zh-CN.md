@@ -9,6 +9,7 @@
 ## 特性
 
 - **一条命令，整体切换。** `/switch zen` 关闭技能、扩展、提示模板和自定义主题；`/switch default` 再把它们打开。
+- **白名单，不是排除模式。** 配置档只写要保留的东西（`"skills": ["novel-writer"]`），其余全部关掉——不需要写 `!extensions/**` 这种模式。
 - **不会卸载任何东西。** 每个配置档都叠加在一份捕获到的*基线*（base）快照之上。被禁用的 pi 包会变成 `{ "source": "...", "autoload": false }` 而不是消失，所以重新启用是瞬间的。
 - **不会把自己锁死。** 即使是最严格的配置档，也会保留扩展自身所在的包。
 - **可撤销。** 每次切换都会记录被替换的设置，`/switch restore` 原样恢复。
@@ -71,10 +72,10 @@ pi -e ./extensions/switch.ts
     "zen": {
       "description": "Zero skills, zero extensions",
       "packages": [],
-      "extensions": ["!extensions/**", "-builtin:mcp", "-builtin:codemode", "-builtin:tool-search"],
-      "skills": ["!skills/**"],
-      "prompts": ["!prompts/**"],
-      "themes": ["!themes/**"],
+      "extensions": [],
+      "skills": [],
+      "prompts": [],
+      "themes": [],
       "theme": "system",
       "thinkingLevel": "low",
       "tools": ["read", "bash", "edit", "write"]
@@ -82,7 +83,9 @@ pi -e ./extensions/switch.ts
     "review": {
       "extends": "zen",
       "description": "Zen plus one review extension",
-      "packages": ["pi-simplify"]
+      "packages": ["pi-simplify"],
+      "extensions": ["review", "builtin:mcp"],
+      "skills": ["novel-writer"]
     }
   }
 }
@@ -94,12 +97,32 @@ pi -e ./extensions/switch.ts
 | --- | --- | --- |
 | `packages` | `packages` | 保留启用的包来源白名单（子串匹配，例如 `pi-lens` 能匹配 `npm:pi-lens`）。`base` 中其余的包都会被设为 `autoload: false`。本扩展所在的包始终保留。 |
 | `disablePackages` | `packages` | 要禁用的包来源黑名单，其余保持不变。 |
-| `extensions`、`skills`、`prompts`、`themes` | 同名设置 | 替换整个列表。支持 pi 的 `!pattern`、`+path`、`-path` 写法，因此 `!skills/**` 可以关闭自动发现的资源。 |
+| `extensions`、`skills`、`prompts`、`themes` | 同名设置 | **白名单**：写你想保留的东西，一个词（`review`、`novel-writer`）或一个 glob（`extensions/review.ts`、`skills/nov*`）。匹配不到任何东西的就关掉，`[]` 就是“一个都不要”，所以你不需要写排除模式。见[资源白名单](#资源白名单)。 |
 | `theme` | `theme` | 主题名称，例如 `system`、`dracula`，或自定义主题名。 |
 | `model` | `defaultProvider`、`defaultModel` | 写成 `provider/modelId`，或只写 `modelId`。reload 之后也会作用到当前会话。 |
 | `thinkingLevel` | `defaultThinkingLevel` | 可取 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。同样会作用到当前会话。 |
 | `tools` | `defaultTools` | 启动时的工具列表。reload 后该列表也会强制应用到当前会话，因此被移除的工具确实会消失。 |
 | `extends` | — | 继承另一个配置档；`"base"` 表示基线快照。 |
+
+### 资源白名单
+
+配置档从“空”开始。声明了 `extensions` 就只保留匹配得上的扩展，而没提到的 `skills`、`prompts`、`themes`
+也一律关掉——所以配置档写的是你要什么，而不是要排除什么。
+
+两个配置档是例外，因为它们的意思是“你有的全部”：`base`，以及没有声明任何资源覆盖项的 `default`。
+这就是 `/switch default` 仍然会把所有东西打开的原因。
+
+- 匹配的对象是 pi 会自动发现的资源：`~/.pi/agent/extensions|skills|prompts|themes`、`~/.agents/skills`，
+  以及项目的 `.pi/` 对应目录。技能按目录名匹配（`novel-writer`），文件按名称或路径匹配。
+- pi 自带的内置扩展（`mcp`、`codemode`、`tool-search`、`llama.cpp`）不在 `extensions/**` 下面，
+  所以白名单要直接点名：写 `builtin:mcp` 就保留，不写就关掉。
+- *包*提供的资源跟着 `packages` 白名单走，因为 pi 是用包自己的过滤器筛它们的。要保留某个包的扩展，
+  就保留这个包。
+- 写进设置的仍然是普通的 pi 条目（`!extensions/**` 加上每个匹配项的 `+extensions/review.ts`），
+  所以 `settings.json` 依旧可读可手改，只是这些条目由 `/switch` 生成。
+- `/switch save <名称>` 会把当前启用的资源记录成白名单，所以保存下来的配置档能复现当时的状态。
+- 旧版本写的配置档（`!pattern`、`+path`、`-path` 列表）会在加载时迁移：原本被保留的项变成白名单，
+  只有排除项的列表变成 `[]`。
 
 ### 基线、save 与 refresh
 

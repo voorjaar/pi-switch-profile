@@ -39,6 +39,15 @@ All notable changes to pi-switch-profile are documented here.
 
 ### Changed
 
+- **Profile resource keys are whitelists now.** `extensions`, `skills`, `prompts`, and `themes` list what to
+  keep - a substring (`novel-writer`) or a glob (`extensions/review.ts`) - and everything else is switched off,
+  so a profile no longer needs `!extensions/**` or `-builtin:mcp` written by hand. A built-in is kept by naming
+  it (`builtin:mcp`); resources a package provides follow the `packages` whitelist. A profile starts from nothing
+  for the keys it does not declare, except `base` and a `default` with no resource overrides, which keep
+  everything - so `/switch default` still turns everything back on. The settings written are still plain pi
+  entries (`!kind/**` plus a `+path` per match). A profile written under the old filter semantics is migrated on
+  load: its force-includes and plain entries become the whitelist, and a deny-only list such as the old `zen`
+  becomes `[]`. `/switch save <profile>` now records the enabled resources as a whitelist.
 - Renamed the package from `pi-switch-config` to `pi-switch-profile`, and the profile store with it:
   `~/.pi/agent/pi-switch-config.json` is renamed to `~/.pi/agent/pi-switch-profile.json` on load (the project
   file likewise). An existing `npm:pi-switch-config` entry in `settings.json` still loads this extension, and
