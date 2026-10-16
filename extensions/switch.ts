@@ -667,6 +667,22 @@ export function knownProfilesHint(store: Store): string {
 /* -------------------------------------------------------------------------- */
 
 const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "revert-session", "doctor", "help"] as const;
+/**
+ * Internal subcommand. `session_start` has no reload handle, so a start revert asks for a
+ * reload by sending this as a user message: a command handler does have one.
+ */
+export const REVERT_RELOAD_SUB = "__revert-reload";
+
+/**
+ * Whether a revert needs packages, extensions, skills, prompts, or themes re-resolved.
+ * A change only in theme / model / thinking level / tools can be applied to the live
+ * session directly and does not need a reload.
+ */
+export function revertNeedsReload(changes: string[]): boolean {
+  return changes.some(
+    (change) => change.startsWith("package on: ") || change.startsWith("package off: ") || /^(extensions|skills|prompts|themes):/.test(change),
+  );
+}
 
 /**
  * A profile name must be typeable as `/switch <name>`, so it may not collide with a
@@ -675,6 +691,7 @@ const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "re
 export function validateNewProfileName(name: string): string | undefined {
   if (name === BASE_PROFILE_NAME) return "'base' is reserved (use /switch refresh)";
   if ((SUBCOMMANDS as readonly string[]).includes(name)) return `"${name}" is a subcommand, so a profile with that name could never be switched to`;
+  if (name === REVERT_RELOAD_SUB) return `"${name}" is reserved for internal use`;
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) return `"${name}" is not a usable profile name (letters, digits, dot, dash, underscore, starting with a letter or digit)`;
   return undefined;
 }
@@ -718,10 +735,15 @@ export default function (pi: ExtensionAPI): void {
         if (reverted !== undefined) {
           const restored = resolveProfile(reverted.profileLabel, loadStore(agentDir, ctx.cwd).profiles).profile;
           applyRuntimeProfile(pi, ctx, restored);
+          // Packages, extensions, skills, and prompts were already resolved from the stale
+          // settings before this handler existed. Ask for a reload through a command context,
+          // which is the only place that has reload().
+          const needsReload = revertNeedsReload(reverted.changes);
           ctx.ui.notify(
-            `/switch: restored the default configuration at session start (was "${reverted.wasActive ?? "no profile"}"). Resources that profile loaded are still in this session; run /reload to drop them.`,
+            `/switch: restored the default configuration at session start (was "${reverted.wasActive ?? "no profile"}")${needsReload ? " and reloading" : ""}.`,
             "info",
           );
+          if (needsReload) pi.sendUserMessage(`/switch ${REVERT_RELOAD_SUB}`, { expandPromptTemplates: true });
         }
       } catch {
         // A failed revert must not stop the session from starting.
@@ -866,6 +888,7 @@ async function handleSwitch(
   if (sub === "doctor") return handleDoctor(env);
   if (sub === "refresh") return handleRefresh(env);
   if (sub === "revert-session") return handleRevertSession(env, tokens[1]);
+  if (sub === REVERT_RELOAD_SUB) return handleRevertReload(env);
   if (sub === "restore") return handleRestore(env);
   if (sub === "save") return handleSave(env, tokens[1]);
   if (sub === "delete") return handleDelete(env, tokens[1]);
@@ -1049,6 +1072,15 @@ function handleRevertSession(env: SwitchEnv, value: string | undefined): void {
     return;
   }
   ctx.ui.notify('/switch revert-session <start|end|off|status>: unknown value', "error");
+}
+
+/**
+ * The reload half of a session-start revert. Sent to itself as a user message because only
+ * a command context has reload(); everything after the reload runs in session_start.
+ */
+async function handleRevertReload(env: SwitchEnv): Promise<void> {
+  env.ctx.ui.notify('/switch: reloading so the previous profile\'s packages, extensions, and skills are dropped', "info");
+  await env.ctx.reload();
 }
 
 /**

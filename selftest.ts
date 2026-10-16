@@ -41,6 +41,8 @@ import {
   STORE_FILE_NAME,
   type Store,
   validateNewProfileName,
+  revertNeedsReload,
+  REVERT_RELOAD_SUB,
   seedProfiles,
   SELF_PACKAGE_NAME,
   summarizeSettings,
@@ -442,6 +444,10 @@ check("subcommand names cannot be profiles", ["list", "show", "save", "delete", 
 check("base is reserved for the snapshot", validateNewProfileName("base") !== undefined);
 check("ordinary names are usable", validateNewProfileName("my-setup") === undefined && validateNewProfileName("dev.2") === undefined && validateNewProfileName("coder_x") === undefined);
 check("path-like and empty names are rejected", validateNewProfileName("../evil") !== undefined && validateNewProfileName("") !== undefined && validateNewProfileName("-x") !== undefined);
+check("the internal reload subcommand cannot be a profile name", validateNewProfileName(REVERT_RELOAD_SUB) !== undefined);
+
+check("a revert that changes resources needs a reload", revertNeedsReload(["package off: npm:pi-lens"]) && revertNeedsReload(["package on: npm:x"]) && revertNeedsReload(["skills: [] -> ['!skills/**']"]) && revertNeedsReload(["extensions: x -> y", "theme: a -> b"]));
+check("a revert that only changes runtime settings does not", revertNeedsReload(["theme: system -> github-dark-default"]) === false && revertNeedsReload(["defaultTools: [...] -> undefined"]) === false && revertNeedsReload(["defaultModel: a -> b", "defaultThinkingLevel: low -> medium"]) === false && revertNeedsReload([]) === false);
 
 /* ---------------- corrupt store ---------------- */
 

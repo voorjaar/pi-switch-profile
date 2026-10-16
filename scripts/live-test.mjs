@@ -403,7 +403,15 @@ async function main() {
     await runSlash("/switch revert-session start");
     check("revert-session start confirmed", lastNotification((text) => text.includes("revert-session: start")) !== undefined, notifications.slice(-1)[0]);
 
-    const stale = { ...readSettings(), theme: "system", defaultTools: ["read", "bash"] };
+    const currentPackages = readSettings().packages ?? [];
+    const firstSource = typeof currentPackages[0] === "string" ? currentPackages[0] : currentPackages[0]?.source;
+    const stale = {
+      ...readSettings(),
+      theme: "system",
+      defaultTools: ["read", "bash"],
+      // A disabled package is the part a live session cannot undo without a reload.
+      packages: currentPackages.map((entry, index) => (index === 0 ? { source: firstSource, autoload: false } : entry)),
+    };
     writeFileSync(settingsPath, `${JSON.stringify(stale, null, 2)}\n`, "utf8");
 
     secondChild.stdin.end();
@@ -435,6 +443,26 @@ async function main() {
     );
     check("the start revert recorded the profile it returned to", readStore().activeProfile === "default", readStore().activeProfile);
     check("the start revert left no notice for a later session", readStore().revertedOnQuit === undefined, readStore().revertedOnQuit);
+
+    // The stale settings had a disabled package, so the revert has to reload the session
+    // for it to actually take effect.
+    const reloading = await waitFor(
+      () => lastNotification((text) => text.includes("reloading so the previous profile")) !== undefined,
+      60_000,
+      "automatic reload after the start revert",
+    );
+    check("the start revert reloads the session", reloading, notifications.slice(-3).join(" | "));
+
+    const commandsAfterRevert = await send({ type: "get_commands" }, 120_000);
+    const revertNames = (commandsAfterRevert.data?.commands ?? []).map((command) => command.name);
+    check("/switch survives the automatic reload", revertNames.includes("switch"), `${revertNames.length} commands`);
+
+    const revertDoctor = await runDoctor("doctor report after the start revert");
+    check(
+      "the session really is on the default configuration after the start revert",
+      revertDoctor.includes('Settings match profile "default"') && /ast_grep_search|lens_diagnostic_mark|browser_navigate|web_search/.test(revertDoctor),
+      { match: revertDoctor.includes('Settings match profile "default"'), tools: revertDoctor.match(/configured tools[^\n]*/)?.[0] ?? revertDoctor.slice(-200) },
+    );
 
     thirdChild.stdin.end();
     const third = await waitForPromise(thirdExit, 90_000);

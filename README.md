@@ -145,9 +145,9 @@ correct the moment the session closes.
 
 - A start revert runs when the settings differ from the default configuration. It writes `settings.json`, records
   history (so `/switch restore` undoes it), and enforces the default profile's tools, model, and thinking level on
-  the live session. Packages, extensions, skills, and prompts that profile loaded are already in this session - pi
-  resolves them before an extension can act, and `session_start` has no reload handle - so the notice tells you to
-  run `/reload` (or `/switch default`, which does reload).
+  the live session. If the change touches packages, extensions, skills, prompts, or themes - which pi resolved
+  before the extension could act - it then reloads the session, so the previous profile's resources actually go
+  away. A change only in theme, model, thinking level, or tools is applied in place with no reload.
 - An end revert runs only on a real session close. `/reload`, `/new`, `/resume`, and `/fork` are not closes, so a
   profile you switched to stays applied through them. The UI is being torn down there, so the notice is stored and
   shown at the start of the next session instead.

@@ -13,7 +13,10 @@ All notable changes to pi-switch-profile are documented here.
   them back when the session closes, and `off` lets the last switch win. A start revert also re-applies the
   default profile's tools, model, and thinking level to the live session, and says so in a notice; an end revert
   stores its notice for the next session because the UI is being torn down. Nothing is written when the settings
-  already match the default configuration or when no base snapshot exists yet. `/switch restore` undoes either.
+  already match the default configuration or when no base snapshot exists yet. `/switch restore` undoes either. When a
+  start revert changes packages, extensions, skills, prompts, or themes it reloads the session afterwards (sent to
+  itself as an internal `/switch __revert-reload` command, because only a command context can reload), so the
+  previous profile's resources actually go away instead of lingering until you type `/reload`.
 - Added `/switch <profile>`: applies a configuration profile to `~/.pi/agent/settings.json` and runs pi's own
   reload, so packages, extensions, skills, prompt templates, themes, theme, model, thinking level, and default
   tools all change at once. Ships with seeded `zen` (no packages, no auto-discovered resources) and `default`
