@@ -1,4 +1,4 @@
-# pi-switch-config
+# pi-switch-profile
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -12,6 +12,7 @@ Use it to move between a stripped-down session and a fully equipped one without 
 - **Nothing is uninstalled.** Profiles overlay a captured *base* snapshot of `settings.json`. A disabled pi package becomes `{ "source": "...", "autoload": false }` instead of disappearing, so re-enabling it is instant.
 - **Never locks itself out.** The extension keeps its own package enabled even in the strictest profile.
 - **Undo.** Every switch records the settings it replaced; `/switch restore` puts them back.
+- **Session-scoped switches.** `revertSession` puts the session back on the default configuration at session start (the default) or at session close, so a switch you only wanted for now does not leak into the next session.
 - **Seeded profiles.** `zen` (zero skills, zero extensions) and `default` (everything from the base snapshot) are created on first use.
 - **Visible state.** The footer shows the active profile, and `/switch` prints the resolved configuration and the exact changes. If you edit `settings.json` by hand afterwards, `/switch` and `/switch doctor` say so instead of pretending the profile is applied.
 - **Autocomplete.** Profile names complete as command arguments.
@@ -21,7 +22,7 @@ Use it to move between a stripped-down session and a fully equipped one without 
 Install the package (it writes the package declaration to `~/.pi/agent/settings.json`):
 
 ```bash
-pi install ./pi-switch-config
+pi install ./pi-switch-profile
 ```
 
 Or try it once without installing anything:
@@ -43,6 +44,7 @@ If you edit `settings.json` by hand, run `/reload` afterwards.
 | `/switch save <profile>` | Capture the current configuration as a new profile |
 | `/switch refresh` | Re-capture the base snapshot from `settings.json` (do this after installing a package by hand) |
 | `/switch restore` | Undo the last switch |
+| `/switch revert-session <start\|end\|off\|status>` | When the session returns to the default configuration (default: `start`) |
 | `/switch delete <profile>` | Remove a profile |
 | `/switch doctor` | Show what the live session actually has: model, thinking level, active and configured tools, and whether settings match the active profile |
 | `/switch help` | List the subcommands |
@@ -51,12 +53,13 @@ Profiles are also slash-command arguments: type `/switch` with a trailing space 
 
 ## Profiles
 
-Profiles live in `~/.pi/agent/pi-switch-config.json`, with optional project profiles in `.pi/pi-switch-config.json`:
+Profiles live in `~/.pi/agent/pi-switch-profile.json`, with optional project profiles in `.pi/pi-switch-profile.json`:
 
 ```json
 {
   "version": 1,
   "activeProfile": "zen",
+  "revertSession": "start",
   "base": {
     "packages": ["npm:pi-lens", "npm:pi-web-access"],
     "theme": "github-dark-default",
@@ -98,11 +101,14 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 | `tools` | `defaultTools` | The startup tool list. After a reload the profile's list is enforced on the live session too, so tools removed from the profile actually go away. |
 | `extends` | — | Inherit another profile. `"base"` means the base snapshot. |
 
+Store options, not per-profile: `revertSession` (`"start" | "end" | "off"`, default `"start"`) decides when the session
+returns to the default configuration; see [Reverting to the default configuration](#reverting-to-the-default-configuration).
+
 ### Base, save, and refresh
 
 `base` is the snapshot of `settings.json` that every profile overlays. Capture it while no profile is active:
 
-- `/switch save my-setup` records the current configuration as a profile you can return to. Profile names must be typeable as `/switch <name>`, so `base` and the subcommand names (`list`, `show`, `save`, `delete`, `refresh`, `restore`, `doctor`, `help`) are reserved.
+- `/switch save my-setup` records the current configuration as a profile you can return to. Profile names must be typeable as `/switch <name>`, so `base` and the subcommand names (`list`, `show`, `save`, `delete`, `refresh`, `restore`, `revert-session`, `doctor`, `help`) are reserved.
 - `/switch refresh` re-reads `settings.json` into `base`. Run it when you want the *enablement* snapshot to follow what `pi config` currently says.
 
 ### What a switch writes
@@ -119,6 +125,36 @@ is the same rule applied to the exact settings recorded before the switch.
 - A package you removed with `pi remove` is dropped, so switching never writes it back (pi would reinstall an `npm:` source during resolve).
 - A profile with neither `packages` nor `disablePackages` enables every known package. `packages` is a whitelist, `disablePackages` a blacklist; both accept partial matches such as `pi-lens` or `npm:pi-lens`.
 - This extension always keeps itself enabled. If a profile could switch itself off, there would be no way back except editing `settings.json`.
+
+### Reverting to the default configuration
+
+`revertSession` decides when a session goes back to the default configuration: the `default` profile when it exists
+(so a `default` you gave overrides is what you return to), otherwise the `base` snapshot with every known package
+enabled.
+
+```bash
+/switch revert-session start   # every new session starts on the default configuration (the default)
+/switch revert-session end     # the session close writes the default configuration back
+/switch revert-session off     # the last switch stays applied across sessions
+/switch revert-session         # report which mode is in effect
+```
+
+`"start"` is the default because it also covers a session that could not clean up after itself: if pi is killed or
+the machine sleeps with a profile applied, the next session drops it. `"end"` is for people who want the file to be
+correct the moment the session closes.
+
+- A start revert runs when the settings differ from the default configuration. It writes `settings.json`, records
+  history (so `/switch restore` undoes it), and enforces the default profile's tools, model, and thinking level on
+  the live session. Packages, extensions, skills, and prompts that profile loaded are already in this session - pi
+  resolves them before an extension can act, and `session_start` has no reload handle - so the notice tells you to
+  run `/reload` (or `/switch default`, which does reload).
+- An end revert runs only on a real session close. `/reload`, `/new`, `/resume`, and `/fork` are not closes, so a
+  profile you switched to stays applied through them. The UI is being torn down there, so the notice is stored and
+  shown at the start of the next session instead.
+- Nothing is written when the settings already are the default configuration, and nothing is written before a `base`
+  snapshot exists, so a session in which you never switched leaves the file alone.
+- pi writes back only the settings keys it changed itself, so a revert written at exit survives apart from a key pi
+  changed during the session (for example `defaultModel` after `/model`). `/switch doctor` reports what is left.
 
 ### Scope
 

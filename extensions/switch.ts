@@ -1,12 +1,12 @@
 /**
- * pi-switch-config
+ * pi-switch-profile
  *
  * `/switch <profile>` swaps pi's resource configuration (pi packages, extension
  * paths, skill paths, prompt-template paths, theme paths, theme, default model,
  * thinking level, default tools) and then runs pi's own reload.
  *
- * Profiles live in `<agent-dir>/pi-switch-config.json` (plus optional
- * `.pi/pi-switch-config.json` for the project). Every profile is an overlay on
+ * Profiles live in `<agent-dir>/pi-switch-profile.json` (plus optional
+ * `.pi/pi-switch-profile.json` for the project). Every profile is an overlay on
  * top of a captured `base` snapshot of the settings file, so switching is
  * reversible and never uninstalls anything: disabled packages become
  * `{ source, autoload: false }` entries instead of disappearing.
@@ -83,17 +83,34 @@ export interface Store {
   activeProfile?: string;
   profiles: Record<string, Profile>;
   history: Snapshot[];
+  /** When the session should end on the default configuration. Defaults to "start". */
+  revertSession?: RevertSessionMode;
+  /** Set when a revert at session close actually changed settings; reported at the next session start. */
+  revertedOnQuit?: RevertNotice;
+}
+
+export type RevertSessionMode = "start" | "end" | "off";
+
+export interface RevertNotice {
+  at: string;
+  fromProfile: string | null;
+  changes: string[];
 }
 
 /* -------------------------------------------------------------------------- */
 /* Paths                                                                       */
 /* -------------------------------------------------------------------------- */
 
-export const SELF_PACKAGE_NAME = "pi-switch-config";
-export const STORE_FILE_NAME = "pi-switch-config.json";
+export const SELF_PACKAGE_NAME = "pi-switch-profile";
+/** The name this package had before it was renamed; still matched for self-detection. */
+export const LEGACY_SELF_PACKAGE_NAMES = ["pi-switch-config"];
+export const STORE_FILE_NAME = "pi-switch-profile.json";
+/** Store file name written by older versions. */
+export const LEGACY_STORE_FILE_NAME = "pi-switch-config.json";
 export const SETTINGS_FILE_NAME = "settings.json";
 export const PROJECT_DIR_NAME = ".pi";
 const BASE_PROFILE_NAME = "base";
+const DEFAULT_PROFILE_NAME = "default";
 const MAX_HISTORY = 12;
 
 export function getAgentDir(): string {
@@ -173,7 +190,7 @@ function writeJsonFile(path: string, value: unknown): void {
 
 function basenameForTmp(path: string): string {
   const name = path.slice(path.lastIndexOf("/") + 1);
-  return name || "pi-switch-config";
+  return name || "pi-switch-profile";
 }
 
 /* -------------------------------------------------------------------------- */
@@ -254,6 +271,9 @@ export function packageSourceMatches(entry: PackageSource, pattern: string): boo
 export function isSelfPackageSource(entry: PackageSource, settingsBaseDir: string, packageRoot: string): boolean {
   const source = packageSourceString(entry);
   if (source.includes(SELF_PACKAGE_NAME)) return true;
+  // An install that still points at the old package name or checkout directory is the
+  // same extension, and disabling it would take /switch with it.
+  if (LEGACY_SELF_PACKAGE_NAMES.some((name) => source.includes(name))) return true;
   if (/^(npm|git|https?):/.test(source)) return false;
   const resolved = isAbsolute(source) ? resolve(source) : resolve(settingsBaseDir, expandTilde(source));
   return resolved === packageRoot || resolved.startsWith(`${packageRoot}/`);
@@ -505,7 +525,7 @@ export function seedProfiles(): Record<string, Profile> {
       thinkingLevel: "low",
       tools: ["read", "bash", "edit", "write"],
     },
-    default: {
+    [DEFAULT_PROFILE_NAME]: {
       description: "Everything from the base snapshot (no overrides)",
     },
   };
@@ -516,7 +536,7 @@ export function seedProfiles(): Record<string, Profile> {
  * name, so it is migrated on load - but only the seeded shape (a description and nothing
  * else), never a real profile the user built and happened to call `coder`.
  */
-const LEGACY_SEED_PROFILES: Record<string, string> = { coder: "default" };
+const LEGACY_SEED_PROFILES: Record<string, string> = { coder: DEFAULT_PROFILE_NAME };
 
 export function migrateLegacyProfiles(profiles: Record<string, Profile>): {
   profiles: Record<string, Profile>;
@@ -544,8 +564,26 @@ export function storePath(agentDir: string, cwd: string): { global: string; proj
   };
 }
 
+/**
+ * Rename the store file an older version wrote, so an existing base snapshot, profiles,
+ * history, and revert options survive the package rename. When both names exist the new
+ * file wins and the old one is left alone (nothing is deleted).
+ */
+export function migrateStoreFile(path: string, legacyPath: string): boolean {
+  if (path === legacyPath) return false;
+  if (existsSync(path) || !existsSync(legacyPath)) return false;
+  try {
+    renameSync(legacyPath, path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function loadStore(agentDir: string, cwd: string): Store {
   const paths = storePath(agentDir, cwd);
+  migrateStoreFile(paths.global, join(agentDir, LEGACY_STORE_FILE_NAME));
+  migrateStoreFile(paths.project, join(cwd, PROJECT_DIR_NAME, LEGACY_STORE_FILE_NAME));
   const globalStore = readJsonFile(paths.global) as Store | undefined;
   const projectStore = readJsonFile(paths.project) as Store | undefined;
 
@@ -564,6 +602,8 @@ export function loadStore(agentDir: string, cwd: string): Store {
     activeProfile: recordedActive !== undefined && renamed.has(recordedActive) ? renamed.get(recordedActive) : recordedActive,
     profiles: migrated.profiles,
     history: Array.isArray(globalStore?.history) ? globalStore.history : [],
+    revertSession: parseRevertSessionMode(globalStore),
+    revertedOnQuit: parseRevertNotice(globalStore?.revertedOnQuit),
   };
   if (!store.profiles[BASE_PROFILE_NAME]) {
     store.profiles = { [BASE_PROFILE_NAME]: { description: "The captured base configuration" }, ...store.profiles };
@@ -582,6 +622,8 @@ export function saveStore(store: Store, agentDir: string): void {
     activeProfile: store.activeProfile,
     profiles: store.profiles,
     history: store.history.slice(-MAX_HISTORY),
+    revertSession: store.revertSession,
+    revertedOnQuit: store.revertedOnQuit,
   };
   writeJsonFile(path, next);
 }
@@ -624,7 +666,7 @@ export function knownProfilesHint(store: Store): string {
 /* Extension                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "doctor", "help"] as const;
+const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "revert-session", "doctor", "help"] as const;
 
 /**
  * A profile name must be typeable as `/switch <name>`, so it may not collide with a
@@ -668,23 +710,60 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async (event, ctx) => {
+    // revertSession "start": a profile that survived a killed session is put back before
+    // this session does any work.
+    if (event.reason === "startup") {
+      try {
+        const reverted = applySessionRevert(agentDir, packageRoot, ctx.cwd, "start");
+        if (reverted !== undefined) {
+          const restored = resolveProfile(reverted.profileLabel, loadStore(agentDir, ctx.cwd).profiles).profile;
+          applyRuntimeProfile(pi, ctx, restored);
+          ctx.ui.notify(
+            `/switch: restored the default configuration at session start (was "${reverted.wasActive ?? "no profile"}"). Resources that profile loaded are still in this session; run /reload to drop them.`,
+            "info",
+          );
+        }
+      } catch {
+        // A failed revert must not stop the session from starting.
+      }
+    }
     const store = loadStore(agentDir, ctx.cwd);
+    // A revert happened when the previous session closed, where a notify could not be
+    // seen. Say so here, where it can.
+    const notice = store.revertedOnQuit;
+    if (notice !== undefined) {
+      store.revertedOnQuit = undefined;
+      saveStore(store, agentDir);
+      ctx.ui.notify(
+        `/switch: reverted to profile "${store.activeProfile ?? "base"}" when the previous session closed (was "${notice.fromProfile ?? "no profile"}"). /switch restore undoes it.`,
+        "info",
+      );
+    }
     const active = store.activeProfile;
     if (!active) {
-      ctx.ui.setStatus("pi-switch-config", undefined);
+      ctx.ui.setStatus("pi-switch-profile", undefined);
       return;
     }
     let profile: Profile;
     try {
       profile = resolveProfile(active, store.profiles).profile;
     } catch {
-      ctx.ui.setStatus("pi-switch-config", `profile ${active} (broken)`);
+      ctx.ui.setStatus("pi-switch-profile", `profile ${active} (broken)`);
       return;
     }
-    ctx.ui.setStatus("pi-switch-config", `profile: ${active}`);
+    ctx.ui.setStatus("pi-switch-profile", `profile: ${active}`);
     // Only re-apply after a reload triggered by /switch. On a fresh session pi
     // already applies defaultTools / defaultModel / defaultThinkingLevel itself.
     if (event.reason === "reload") applyRuntimeProfile(pi, ctx, profile);
+  });
+
+  pi.on("session_shutdown", (event, ctx) => {
+    if (event.reason !== "quit") return;
+    try {
+      applySessionRevert(agentDir, packageRoot, ctx.cwd, "end");
+    } catch {
+      // A failed revert must not interfere with the session closing.
+    }
   });
 }
 
@@ -786,6 +865,7 @@ async function handleSwitch(
   if (sub === "help") return handleHelp(env);
   if (sub === "doctor") return handleDoctor(env);
   if (sub === "refresh") return handleRefresh(env);
+  if (sub === "revert-session") return handleRevertSession(env, tokens[1]);
   if (sub === "restore") return handleRestore(env);
   if (sub === "save") return handleSave(env, tokens[1]);
   if (sub === "delete") return handleDelete(env, tokens[1]);
@@ -805,6 +885,7 @@ function handleHelp(env: SwitchEnv): void {
       "/switch restore            undo the last switch",
       "/switch delete <profile>   remove a profile",
       "/switch doctor             what this session actually has: model, tools, drift",
+      "/switch revert-session <start|end|off>   revert to the default configuration at session start or close",
     ].join("\n"),
     "info",
   );
@@ -822,6 +903,8 @@ function handleList(env: SwitchEnv): void {
     "",
     "Current configuration:",
     ...summarizeSettings(currentSettings),
+    "",
+    `revert session: ${store.revertSession ?? "start"}`,
   ];
   const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot });
   if (drift !== undefined) {
@@ -842,6 +925,7 @@ function handleDoctor(env: SwitchEnv): void {
     `active profile: ${store.activeProfile ?? "(none)"}`,
     `model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "(none)"}`,
     `thinking: ${ctx.thinkingLevel ?? "(unset)"}`,
+    `revert session: ${store.revertSession ?? "start"}`,
     "",
     `active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`,
     `configured tools (${configuredTools.length}): ${configuredTools.map((tool) => tool.name).join(", ") || "(none)"}`,
@@ -869,6 +953,134 @@ function handleRefresh(env: SwitchEnv): void {
  * The profile a restore should re-activate. The profile recorded before the switch may
  * have been deleted since, and claiming it would put a nonexistent name in the footer.
  */
+/* -------------------------------------------------------------------------- */
+/* Session-end revert                                                          */
+/* -------------------------------------------------------------------------- */
+
+export function parseRevertNotice(value: unknown): RevertNotice | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  if (typeof record.at !== "string") return undefined;
+  return {
+    at: record.at,
+    fromProfile: typeof record.fromProfile === "string" ? record.fromProfile : null,
+    changes: Array.isArray(record.changes) ? record.changes.map((change) => String(change)) : [],
+  };
+}
+
+/** How a revert should name the configuration it returns to. */
+export function revertTargetProfile(store: Store): string {
+  return store.profiles[DEFAULT_PROFILE_NAME] !== undefined ? DEFAULT_PROFILE_NAME : BASE_PROFILE_NAME;
+}
+
+/**
+ * The one option that decides when a session returns to the default configuration, plus
+ * the boolean it replaced: `revertWhenSessionEnd: true` means "end", `false` means "off".
+ * A store that never set either gets "start".
+ */
+export function parseRevertSessionMode(store: Store | Record<string, unknown> | undefined): RevertSessionMode {
+  const fields = store as { revertSession?: unknown; revertWhenSessionEnd?: unknown } | undefined;
+  const value = fields?.revertSession;
+  if (value === "start" || value === "end" || value === "off") return value;
+  const legacy = fields?.revertWhenSessionEnd;
+  if (legacy === true) return "end";
+  if (legacy === false) return "off";
+  return "start";
+}
+
+/**
+ * "The default configuration": the default profile when it exists (so a default the user
+ * gave overrides is honoured), otherwise the base snapshot with every currently known
+ * package enabled.
+ */
+export function defaultConfiguration(
+  store: Store,
+  currentSettings: ManagedSettings,
+  options: { settingsBaseDir: string; packageRoot: string },
+): ManagedSettings {
+  const profile = store.profiles[DEFAULT_PROFILE_NAME] !== undefined ? resolveProfile(DEFAULT_PROFILE_NAME, store.profiles).profile : {};
+  return buildProfileSettings(store.base, profile, options, currentSettings);
+}
+
+/**
+ * What the settings should become at the revert point, or undefined when there is nothing
+ * to do: the mode is off, the mode is not this point, or the settings already are the
+ * default configuration.
+ */
+export function planSessionRevert(
+  store: Store,
+  currentSettings: ManagedSettings,
+  options: { settingsBaseDir: string; packageRoot: string },
+  point: "start" | "end",
+): { settings: ManagedSettings; changes: string[]; profileLabel: string } | undefined {
+  const mode = store.revertSession ?? "start";
+  if (mode === "off" || mode !== point) return undefined;
+  // No base captured yet: there is no "default configuration" to go back to, and writing
+  // an empty one would strip settings the extension never captured.
+  if (Object.keys(store.base).length === 0) return undefined;
+  const settings = defaultConfiguration(store, currentSettings, options);
+  const changes = diffSettings(currentSettings, settings);
+  if (changes.length === 0) return undefined;
+  return { settings, changes, profileLabel: revertTargetProfile(store) };
+}
+
+function describeRevertMode(mode: RevertSessionMode, store: Store): string {
+  const target = revertTargetProfile(store) === DEFAULT_PROFILE_NAME ? "the default profile" : "the base snapshot";
+  if (mode === "start") return `a new session starts on ${target}, so a profile left behind by a killed session is dropped`;
+  if (mode === "end") return `closing the session writes ${target} back`;
+  return "the last switch stays applied across sessions";
+}
+
+function handleRevertSession(env: SwitchEnv, value: string | undefined): void {
+  const { ctx, store } = env;
+  if (value === "start" || value === "end" || value === "off") {
+    if (store.revertSession === value) {
+      ctx.ui.notify(`/switch revert-session: already ${value} (${describeRevertMode(value, store)})`, "info");
+      return;
+    }
+    store.revertSession = value;
+    saveStore(store, env.agentDir);
+    ctx.ui.notify(`/switch revert-session: ${value} - ${describeRevertMode(value, store)}`, "info");
+    return;
+  }
+  if (value === undefined || value === "status") {
+    const mode = store.revertSession ?? "start";
+    ctx.ui.notify(`/switch revert-session: ${mode} (${describeRevertMode(mode, store)})`, "info");
+    return;
+  }
+  ctx.ui.notify('/switch revert-session <start|end|off|status>: unknown value', "error");
+}
+
+/**
+ * Write the default configuration back at the configured revert point. "end" runs from
+ * session_shutdown with reason "quit" only (a reload or a session switch is not a session
+ * close, and a killed process never reaches it); "start" runs from session_start with
+ * reason "startup".
+ */
+function applySessionRevert(
+  agentDir: string,
+  packageRoot: string,
+  cwd: string,
+  point: "start" | "end",
+): { wasActive: string | null; profileLabel: string; changes: string[] } | undefined {
+  const store = loadStore(agentDir, cwd);
+  const settingsPath = join(agentDir, SETTINGS_FILE_NAME);
+  const currentSettings = captureManagedSettings(readJsonFile(settingsPath));
+  const plan = planSessionRevert(store, currentSettings, { settingsBaseDir: agentDir, packageRoot }, point);
+  if (plan === undefined) return undefined;
+
+  const at = new Date().toISOString();
+  const wasActive = store.activeProfile ?? null;
+  const previous = writeManagedSettings(settingsPath, plan.settings);
+  store.history = [...store.history, { at, fromProfile: wasActive, toProfile: plan.profileLabel, settings: previous }].slice(-MAX_HISTORY);
+  store.activeProfile = plan.profileLabel;
+  // Only a revert at session close needs a notice for later: at session start the session
+  // that has to hear about it is already here.
+  if (point === "end") store.revertedOnQuit = { at, fromProfile: wasActive, changes: plan.changes.slice(0, 12) };
+  saveStore(store, agentDir);
+  return { wasActive, profileLabel: plan.profileLabel, changes: plan.changes };
+}
+
 export function restoreActiveProfile(fromProfile: string | null | undefined, profiles: Record<string, Profile>): string | undefined {
   if (fromProfile === null || fromProfile === undefined) return undefined;
   return profiles[fromProfile] !== undefined ? fromProfile : undefined;
@@ -965,7 +1177,7 @@ function handleDelete(env: SwitchEnv, name: string | undefined): void {
   const inherited = children.length > 0 ? `; profiles extending it: ${children.join(", ")}` : "";
   if (wasActive) {
     // Deleting does not reload, so clear the footer that still names the removed profile.
-    ctx.ui.setStatus("pi-switch-config", undefined);
+    ctx.ui.setStatus("pi-switch-profile", undefined);
     ctx.ui.notify(`/switch delete: removed profile "${name}"${inherited}; it was the active one, so its settings stay applied until you switch to another profile`, "warning");
     return;
   }
@@ -989,6 +1201,10 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
     packageRoot: env.packageRoot,
   }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
+  if (store.revertSession !== "off") {
+    // Worth saying on every switch: the profile is only good for this session.
+    changes.push(`(revert session is "${store.revertSession ?? "start"}": this switch is undone at session ${store.revertSession === "end" ? "close" : "start"})`);
+  }
 
   // Guard: project-level settings can shadow the global values we are writing.
   const projectSettingsPath = join(ctx.cwd, PROJECT_DIR_NAME, SETTINGS_FILE_NAME);
@@ -1027,7 +1243,7 @@ async function reloadWithSummary(ctx: ExtensionCommandContext, label: string, ch
 /** Notifications are single-shot toasts; a widget is used for long output in the TUI. */
 function showLong(ctx: ExtensionCommandContext, lines: string[]): void {
   if (ctx.mode === "tui" && lines.length > 6) {
-    ctx.ui.setWidget("pi-switch-config", lines, { placement: "aboveEditor" });
+    ctx.ui.setWidget("pi-switch-profile", lines, { placement: "aboveEditor" });
     clearWidgetLater(ctx);
     ctx.ui.notify("/switch: details shown above the editor", "info");
     return;
@@ -1046,7 +1262,7 @@ function clearWidgetLater(ctx: ExtensionCommandContext): void {
   widgetTimer = setTimeout(() => {
     widgetTimer = undefined;
     try {
-      ctx.ui.setWidget("pi-switch-config", undefined);
+      ctx.ui.setWidget("pi-switch-profile", undefined);
     } catch {
       // Runtime may already be gone (reload/shutdown).
     }

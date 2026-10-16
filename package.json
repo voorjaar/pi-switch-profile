@@ -1,5 +1,5 @@
 {
-  "name": "pi-switch-config",
+  "name": "pi-switch-profile",
   "version": "0.1.0",
   "description": "Switch whole pi configuration profiles with /switch - pi packages, extension, skill, prompt and theme paths, theme, default model, thinking level, default tools - then reload",
   "keywords": [
@@ -30,12 +30,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/voorjaar/pi-switch-config.git"
+    "url": "git+https://github.com/voorjaar/pi-switch-profile.git"
   },
   "bugs": {
-    "url": "https://github.com/voorjaar/pi-switch-config/issues"
+    "url": "https://github.com/voorjaar/pi-switch-profile/issues"
   },
-  "homepage": "https://github.com/voorjaar/pi-switch-config#readme",
+  "homepage": "https://github.com/voorjaar/pi-switch-profile#readme",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

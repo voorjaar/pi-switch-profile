@@ -1,4 +1,4 @@
-# pi-switch-config
+# pi-switch-profile
 
 [English](README.md) | **简体中文**
 
@@ -12,6 +12,7 @@
 - **不会卸载任何东西。** 每个配置档都叠加在一份捕获到的*基线*（base）快照之上。被禁用的 pi 包会变成 `{ "source": "...", "autoload": false }` 而不是消失，所以重新启用是瞬间的。
 - **不会把自己锁死。** 即使是最严格的配置档，也会保留扩展自身所在的包。
 - **可撤销。** 每次切换都会记录被替换的设置，`/switch restore` 原样恢复。
+- **会话级切换。** `revertSession` 会在会话开始（默认）或会话结束时把会话换回默认配置，所以一时用的切换不会泄漏到下一个会话。
 - **内置配置档。** 首次使用时自动创建 `zen`（零技能、零扩展）和 `default`（基线快照的全部内容）。
 - **状态可见。** 底栏显示当前生效的配置档，`/switch` 会打印解析后的配置与逐项变更。如果你之后手动改过 `settings.json`，`/switch` 与 `/switch doctor` 会直接指出这一点，而不是假装配置档仍然生效。
 - **自动补全。** 输入 `/switch ` 后按 Tab 会列出配置档名称。
@@ -21,7 +22,7 @@
 安装该包（会把包声明写入 `~/.pi/agent/settings.json`）：
 
 ```bash
-pi install ./pi-switch-config
+pi install ./pi-switch-profile
 ```
 
 或者先临时试用，不做任何安装：
@@ -43,6 +44,7 @@ pi -e ./extensions/switch.ts
 | `/switch save <profile>` | 把当前配置捕获为一个新的配置档 |
 | `/switch refresh` | 从 `settings.json` 重新捕获基线快照（手动安装某个包之后建议执行） |
 | `/switch restore` | 撤销上一次切换 |
+| `/switch revert-session <start\|end\|off\|status>` | 会话何时回到默认配置（默认 `start`） |
 | `/switch delete <profile>` | 删除一个配置档 |
 | `/switch doctor` | 显示当前会话真实状态：模型、思考等级、激活与已配置的工具，以及设置是否与当前配置档一致 |
 | `/switch help` | 列出全部子命令 |
@@ -51,12 +53,13 @@ pi -e ./extensions/switch.ts
 
 ## 配置档
 
-配置档保存在 `~/.pi/agent/pi-switch-config.json`，项目级的配置档可选放在 `.pi/pi-switch-config.json`：
+配置档保存在 `~/.pi/agent/pi-switch-profile.json`，项目级的配置档可选放在 `.pi/pi-switch-profile.json`：
 
 ```json
 {
   "version": 1,
   "activeProfile": "zen",
+  "revertSession": "start",
   "base": {
     "packages": ["npm:pi-lens", "npm:pi-web-access"],
     "theme": "github-dark-default",
@@ -102,7 +105,7 @@ pi -e ./extensions/switch.ts
 
 `base` 是每个配置档叠加其上的 `settings.json` 快照。请在没有配置档生效时捕获它：
 
-- `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。配置档名称必须能作为 `/switch <name>` 输入，因此 `base` 以及子命令名（`list`、`show`、`save`、`delete`、`refresh`、`restore`、`doctor`、`help`）是保留的。
+- `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。配置档名称必须能作为 `/switch <name>` 输入，因此 `base` 以及子命令名（`list`、`show`、`save`、`delete`、`refresh`、`restore`、`revert-session`、`doctor`、`help`）是保留的。
 - `/switch refresh` 重新读取 `settings.json` 并更新 `base`。当你希望“启用状态”的快照跟随 `pi config` 的当前结果时执行一次。
 
 ### 切换时写入的是什么
@@ -115,6 +118,24 @@ pi -e ./extensions/switch.ts
 - 用 `pi remove` 移除的包会被丢弃，切换不会把它写回去（否则 pi 在解析 `npm:` 来源时会重新安装它）。
 - 既没有 `packages` 也没有 `disablePackages` 的配置档会启用所有已知的包。`packages` 是白名单，`disablePackages` 是黑名单，两者都支持部分匹配，例如 `pi-lens` 或 `npm:pi-lens`。
 - 本扩展始终把自己保持在启用状态。如果配置档能把自己关掉，就只能靠手动改 `settings.json` 才能回来了。
+
+### 回到默认配置
+
+`revertSession` 决定会话什么时候回到默认配置：有 `default` 配置档就用它（所以你自己加了覆盖项的 `default` 就是回去的地方），否则用 `base` 快照并启用所有已知的包。
+
+```bash
+/switch revert-session start   # 每个新会话都从默认配置开始（默认）
+/switch revert-session end     # 会话结束时把默认配置写回
+/switch revert-session off     # 最后一次切换一直保留
+/switch revert-session         # 报告当前是哪一种
+```
+
+默认是 `start`，因为它能覆盖“会话来不及自己收尾”的情况：如果 pi 被 kill 或者电脑休眠时还挂着某个配置档，下一个会话会把它丢掉。`end` 适合希望会话一结束文件就立刻正确的人。
+
+- 开始时的回退只在设置与默认配置不一致时执行。它会写 `settings.json`、记录历史（所以 `/switch restore` 能撤销），并在当前会话里重新应用默认配置档的工具、模型和思考等级。那个配置档加载的包、扩展、技能、提示词已经在会话里了——pi 在扩展能行动之前就已经解析完资源，而 `session_start` 的上下文没有 reload 能力——所以通知会提醒你去跑 `/reload`（或者 `/switch default`，它会 reload）。
+- 结束时的回退只在真正的会话关闭时执行。`/reload`、`/new`、`/resume`、`/fork` 都不是会话关闭，所以切过去的配置档会一直生效。那时 UI 正在拆掉，所以通知会被存下来，在下一个会话开始时显示。
+- 如果设置本来就已经是默认配置，则什么都不写；基线快照还没建立时也不写，所以没有切换过的会话不会动这个文件。
+- pi 只会写回它自己改过的设置项，所以退出时写入的回退基本保留，只有会话中 pi 自己改过的键会不一样（例如 `/model` 之后的 `defaultModel`）。剩下的差异可以用 `/switch doctor` 查看。
 
 ### 作用范围
 

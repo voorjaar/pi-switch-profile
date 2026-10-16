@@ -1,11 +1,19 @@
 # Changelog
 
-All notable changes to pi-switch-config are documented here.
+All notable changes to pi-switch-profile are documented here.
 
 ## Unreleased
 
 ### Added
 
+- Added `revertSession: "start" | "end" | "off"` (default `"start"`), reported and changed with
+  `/switch revert-session <start|end|off|status>`. It decides when the session returns to the default
+  configuration (the `default` profile, or the base snapshot when it does not exist): `start` puts the settings
+  back when a new session begins - which also covers a profile left behind by a killed session - `end` writes
+  them back when the session closes, and `off` lets the last switch win. A start revert also re-applies the
+  default profile's tools, model, and thinking level to the live session, and says so in a notice; an end revert
+  stores its notice for the next session because the UI is being torn down. Nothing is written when the settings
+  already match the default configuration or when no base snapshot exists yet. `/switch restore` undoes either.
 - Added `/switch <profile>`: applies a configuration profile to `~/.pi/agent/settings.json` and runs pi's own
   reload, so packages, extensions, skills, prompt templates, themes, theme, model, thinking level, and default
   tools all change at once. Ships with seeded `zen` (no packages, no auto-discovered resources) and `default`
@@ -28,6 +36,11 @@ All notable changes to pi-switch-config are documented here.
 
 ### Changed
 
+- Renamed the package from `pi-switch-config` to `pi-switch-profile`, and the profile store with it:
+  `~/.pi/agent/pi-switch-config.json` is renamed to `~/.pi/agent/pi-switch-profile.json` on load (the project
+  file likewise). An existing `npm:pi-switch-config` entry in `settings.json` still loads this extension, and
+  `/switch` keeps it enabled under the new name. A store written by the boolean `revertWhenSessionEnd` option is
+  read as `revertSession: "end"` (`false` as `"off"`).
 - Renamed the seeded no-override profile from `coder` to `default`. A store written by an earlier version is
   migrated on load, but only the seeded profile: a real profile you named `coder` is left alone, and so is a
   `default` you made yourself.
