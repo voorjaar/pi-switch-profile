@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  applyInstallPolicy,
   applyPackagePolicy,
   buildProfileSettings,
   buildResourceSetting,
@@ -24,6 +25,7 @@ import {
   legacyResourceToWhitelist,
   LEGACY_STORE_FILE_NAME,
   loadUndo,
+  looksLikePackageSource,
   mergePackageSets,
   loadStore,
   migrateLegacyProfiles,
@@ -32,6 +34,8 @@ import {
   parseRevertSessionMode,
   planSessionRevert,
   revertTargetProfile,
+  type InstallRequest,
+  type InstallTarget,
   type ManagedSettings,
   type PackageSource,
   type Profile,
@@ -39,11 +43,13 @@ import {
   packageSourceString,
   packageSourceMatches,
   parseModelSpec,
+  parseInstallArgs,
   profileFromSettings,
   profilesExtending,
   restoreActiveProfile,
   profileNames,
   resolveProfile,
+  resolveInstallTarget,
   saveStore,
   saveUndo,
   STORE_FILE_NAME,
@@ -825,6 +831,151 @@ check(
 writeFileSync(join(projectDir, ".pi", "pi-switch-profile.json"), JSON.stringify({ profiles: { projectOnly: { theme: "solarized" } } }), "utf8");
 const merged = loadStore(storeHome, projectDir);
 check("project profiles merge", merged.profiles.projectOnly?.theme === "solarized", merged.profiles.projectOnly);
+
+/* ---------------- install targeting ---------------- */
+
+const installFixture = join(import.meta.dirname, ".tmp-install");
+rmSync(installFixture, { recursive: true, force: true });
+mkdirSync(join(installFixture, "extensions"), { recursive: true });
+mkdirSync(join(installFixture, "skills/zzz-novel"), { recursive: true });
+mkdirSync(join(installFixture, "skills/zzz-archive"), { recursive: true });
+mkdirSync(join(installFixture, "prompts"), { recursive: true });
+writeFileSync(join(installFixture, "extensions/zzz-review.ts"), "", "utf8");
+writeFileSync(join(installFixture, "extensions/zzz-diff.ts"), "", "utf8");
+writeFileSync(join(installFixture, "skills/zzz-novel/SKILL.md"), "", "utf8");
+writeFileSync(join(installFixture, "skills/zzz-archive/SKILL.md"), "", "utf8");
+writeFileSync(join(installFixture, "prompts/zzz-notes.md"), "", "utf8");
+// A separate empty cwd so the fixture's own .pi dir is not scanned twice.
+const installCwd = tempDir();
+
+function parseOk(args: string[]): Record<string, unknown> {
+  const parsed = parseInstallArgs(args);
+  if ("error" in parsed) {
+    check(`install args parsed: ${args.join(" ")}`, false, parsed.error);
+    return {};
+  }
+  // SAFETY: the union was narrowed by the "error" in check above, so this is an InstallRequest.
+  return parsed as unknown as Record<string, unknown>;
+}
+
+eq("install takes a target and --only profiles", parseOk(["npm:foo", "--only", "coding,notes"]), { target: "npm:foo", only: ["coding", "notes"] });
+eq("install accepts repeated --only", parseOk(["npm:foo", "--only", "coding", "--only", "notes"]), { target: "npm:foo", only: ["coding", "notes"] });
+eq("install accepts --kind", parseOk(["zzz", "--kind", "skills", "--only", "notes"]), { target: "zzz", only: ["notes"], kind: "skills" });
+check("install rejects a missing --only value", "error" in parseInstallArgs(["npm:foo", "--only"]));
+check("install rejects an unknown kind", "error" in parseInstallArgs(["zzz", "--kind", "bogus"]));
+check("install rejects a missing target", "error" in parseInstallArgs(["--only", "coding"]));
+check("install rejects two targets", "error" in parseInstallArgs(["npm:a", "npm:b"]));
+check("install rejects an unknown option", "error" in parseInstallArgs(["npm:a", "--profile", "coding"]));
+eq(
+  "install recognizes pi's package source forms",
+  ["npm:foo", "git:github.com/o/r", "https://example.com/x", "./local", "../local", "~/local", "/abs/local"].map(looksLikePackageSource),
+  [true, true, true, true, true, true, true],
+);
+check("a bare resource name is not a package source", looksLikePackageSource("zzz-review") === false);
+
+function resolveTarget(request: InstallRequest): InstallTarget {
+  const resolved = resolveInstallTarget(request, installFixture, installCwd);
+  if ("error" in resolved) {
+    check(`install target resolved: ${request.target}`, false, resolved.error);
+    return { kind: "packages", terms: [], label: "" };
+  }
+  return resolved;
+}
+
+const req = (target: string, extra: Partial<InstallRequest> = {}): InstallRequest => ({ target, only: [], ...extra });
+
+eq("a package source installs as a package", resolveTarget(req("npm:not-installed-yet")), { kind: "packages", terms: ["npm:not-installed-yet"], label: "npm:not-installed-yet" });
+eq("a resource path resolves to its kind", resolveTarget(req("extensions/zzz-review.ts")), { kind: "extensions", terms: ["extensions/zzz-review.ts"], label: "extensions/zzz-review.ts" });
+eq("a bare term resolves through the discovered resources", resolveTarget(req("zzz-novel")), { kind: "skills", terms: ["skills/zzz-novel"], label: "skills/zzz-novel" });
+eq("--kind scopes a term that matches several kinds", resolveTarget(req("zzz", { kind: "prompts" })), { kind: "prompts", terms: ["prompts/zzz-notes.md"], label: "prompts/zzz-notes.md" });
+check("an ambiguous bare term asks for --kind", "error" in resolveInstallTarget(req("zzz"), installFixture, installCwd));
+check("a term that matches nothing is taken to be a package", resolveTarget(req("zzz-not-here")).kind === "packages");
+check("--kind with no match explains package resources", "error" in resolveInstallTarget(req("zzz-notes", { kind: "themes" }), installFixture, installCwd));
+
+const installProfiles: Record<string, Profile> = {
+  base: {},
+  default: {},
+  zen: {},
+  coding: { packages: ["pi-lens", "npm:zzz-pkg"], extensions: ["extensions/zzz-diff.ts"] },
+  loose: { exclude: { skills: ["zzz-archive"] } },
+};
+const installTargetPackage: InstallTarget = { kind: "packages", terms: ["npm:zzz-pkg"], label: "npm:zzz-pkg" };
+
+const afterPackage = applyInstallPolicy(installProfiles, installTargetPackage, ["coding"]);
+const excludeMap = (profiles: Record<string, Profile>) =>
+  Object.entries(profiles).map(([name, p]) => `${name}=${JSON.stringify(p.exclude?.packages ?? [])}`);
+eq(
+  "a package install excludes every profile except the named one",
+  excludeMap(afterPackage.profiles),
+  [
+    "base=[\"npm:zzz-pkg\"]",
+    "default=[\"npm:zzz-pkg\"]",
+    "zen=[\"npm:zzz-pkg\"]",
+    "coding=[]",
+    "loose=[\"npm:zzz-pkg\"]",
+  ],
+);
+eq(
+  "the named whitelist profile keeps its whitelist untouched",
+  afterPackage.profiles.coding.packages,
+  ["pi-lens", "npm:zzz-pkg"],
+);
+check(
+  "excluding a package from default keeps default a baseline for resources",
+  afterPackage.profiles.default.extensions === undefined && afterPackage.profiles.default.skills === undefined,
+  afterPackage.profiles.default,
+);
+const namedElsewhere = applyInstallPolicy(installProfiles, installTargetPackage, ["notes"]);
+eq(
+  "a whitelist profile outside --only loses the package from its whitelist",
+  { packages: namedElsewhere.profiles.coding.packages, exclude: namedElsewhere.profiles.coding.exclude?.packages },
+  { packages: ["pi-lens"], exclude: ["npm:zzz-pkg"] },
+);
+const againPackage = applyInstallPolicy(afterPackage.profiles, installTargetPackage, ["coding"]);
+eq("re-applying the same install changes nothing", againPackage.changes, []);
+eq("install does not mutate the profiles it was given", installProfiles.loose.exclude?.skills, ["zzz-archive"]);
+
+const installTargetSkill: InstallTarget = { kind: "skills", terms: ["skills/zzz-novel"], label: "skills/zzz-novel" };
+const afterSkill = applyInstallPolicy(installProfiles, installTargetSkill, ["zen"]);
+eq("a profile that starts from nothing gets a whitelist holding exactly the target", afterSkill.profiles.zen.skills, ["skills/zzz-novel"]);
+const afterExcludeOnly = applyInstallPolicy(installProfiles, { kind: "skills", terms: ["skills/zzz-archive"], label: "skills/zzz-archive" }, ["loose"]);
+eq(
+  "an exclude-only profile named by --only loses the exclusion instead of gaining a whitelist",
+  { skills: afterExcludeOnly.profiles.loose.exclude?.skills, whitelist: afterExcludeOnly.profiles.loose.skills },
+  { skills: [], whitelist: undefined },
+);
+check(
+  "baseline profiles are excluded by exclusion, never by a whitelist",
+  afterSkill.profiles.base.skills === undefined && afterSkill.profiles.default.skills === undefined,
+  { base: afterSkill.profiles.base, default: afterSkill.profiles.default },
+);
+
+const installTargetExt: InstallTarget = { kind: "extensions", terms: ["extensions/zzz-review.ts"], label: "extensions/zzz-review.ts" };
+const afterExt = applyInstallPolicy(installProfiles, installTargetExt, ["coding"]);
+eq("--only appends to an existing extension whitelist", afterExt.profiles.coding.extensions, ["extensions/zzz-diff.ts", "extensions/zzz-review.ts"]);
+eq(
+  "a path exclude term becomes an exact deny",
+  buildResourceSetting("extensions", undefined, collectResourceCandidates(installFixture, installCwd), { exclude: afterExt.profiles.default.exclude?.extensions }),
+  ["!extensions/zzz-review.ts"],
+);
+
+const undoHome = tempDir();
+saveUndo({ at: "now", fromProfile: "default", toProfile: "default", settings: { theme: "system" }, profiles: installProfiles }, undoHome);
+const undoRecord = loadUndo(undoHome);
+check(
+  "an install undo record carries the profiles map",
+  undoRecord !== undefined && JSON.stringify(undoRecord.profiles?.loose) === JSON.stringify({ exclude: { skills: ["zzz-archive"] } }),
+  undoRecord?.profiles,
+);
+check(
+  "a switch undo record has no profiles map",
+  (() => {
+    saveUndo({ at: "now", fromProfile: "default", toProfile: "zen", settings: {} }, undoHome);
+    return loadUndo(undoHome)?.profiles === undefined;
+  })(),
+);
+rmSync(installFixture, { recursive: true, force: true });
+rmSync(installCwd, { recursive: true, force: true });
 
 console.log(`${checks - failures}/${checks} checks passed`);
 if (failures > 0) {

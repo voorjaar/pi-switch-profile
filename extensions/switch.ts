@@ -101,6 +101,12 @@ export interface UndoRecord {
   fromProfile: string | null;
   toProfile: string;
   settings: ManagedSettings;
+  /**
+   * The profiles map before the change. Only `/switch install` writes it: installing
+   * retargets profiles, so an undo that restored settings alone would leave the new
+   * resource enabled in profiles it was supposed to stay out of.
+   */
+  profiles?: Record<string, Profile>;
 }
 
 export interface Store {
@@ -629,6 +635,206 @@ export function isBaselineProfile(name: string, profile: Profile): boolean {
   return false;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Install targeting                                                           */
+/* -------------------------------------------------------------------------- */
+
+export type InstallKind = ResourceKind | "packages";
+
+export const INSTALL_KIND_VALUES = [...RESOURCE_KINDS, "packages"] as const;
+
+export interface InstallRequest {
+  target: string;
+  /** Profiles allowed to load it. Empty means "everywhere", which is plain `pi install`. */
+  only: string[];
+  kind?: InstallKind;
+}
+
+export interface InstallTarget {
+  kind: InstallKind;
+  /**
+   * What to write into profiles: the package source for `packages`, otherwise the exact
+   * candidate paths (`skills/foo`) so a tag cannot accidentally cover a similar name.
+   */
+  terms: string[];
+  label: string;
+}
+
+export function parseInstallArgs(tokens: string[]): InstallRequest | { error: string } {
+  let target: string | undefined;
+  let kind: InstallKind | undefined;
+  const only: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--only" || token === "-o") {
+      const value = tokens[index + 1];
+      if (value === undefined || value.startsWith("-")) return { error: "--only needs profile names, for example --only coding,notes" };
+      for (const name of value.split(",")) {
+        const trimmed = name.trim();
+        if (trimmed.length > 0) only.push(trimmed);
+      }
+      index += 1;
+      continue;
+    }
+    if (token === "--kind" || token === "-k") {
+      const value = tokens[index + 1];
+      if (value === undefined || !(INSTALL_KIND_VALUES as readonly string[]).includes(value)) {
+        return { error: `--kind must be one of: ${INSTALL_KIND_VALUES.join(", ")}` };
+      }
+      kind = value as InstallKind;
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) return { error: `Unknown option "${token}"` };
+    if (target !== undefined) return { error: `install takes one target, not "${target}" and "${token}"` };
+    target = token;
+  }
+  if (target === undefined) return { error: "install needs a target: a package source (npm:…) or a resource name" };
+  return { target, only, ...(kind !== undefined ? { kind } : undefined) };
+}
+
+/** pi's package source forms: `npm:…`, `git:…`, `http(s):…`, or a local path. */
+export function looksLikePackageSource(target: string): boolean {
+  return (
+    /^(npm|git|https?):/i.test(target) ||
+    target.startsWith("./") ||
+    target.startsWith("../") ||
+    target.startsWith("~/") ||
+    isAbsolute(target) ||
+    /\.(tgz|tar\.gz)$/i.test(target)
+  );
+}
+
+/**
+ * Decide what the target is. A `kind/…` path is that kind; a bare term is matched against
+ * the auto-discovered resources, and a term that matches nothing is taken to be a package
+ * source (that is the common case: a package that is not installed yet, so nothing matches).
+ */
+export function resolveInstallTarget(request: InstallRequest, agentDir: string, cwd: string): InstallTarget | { error: string } {
+  const candidates = collectResourceCandidates(agentDir, cwd);
+  const asPackage = (target: string): InstallTarget => ({ kind: "packages", terms: [target], label: target });
+
+  if (request.kind === "packages") return asPackage(request.target);
+  if (request.kind === undefined && looksLikePackageSource(request.target)) return asPackage(request.target);
+
+  const kind = request.kind;
+  const matches = candidates.filter(
+    (candidate) => (kind === undefined || candidate.kind === kind) && resourceTermMatches(candidate.rel, request.target),
+  );
+  const kinds = new Set(matches.map((match) => match.kind));
+
+  if (kind === undefined) {
+    if (matches.length === 0) return asPackage(request.target);
+    if (kinds.size > 1) {
+      return {
+        error: `"${request.target}" matches ${kinds.size} resource kinds (${[...kinds].join(", ")}: ${matches.map((m) => m.rel).join(", ")}); pick one with --kind <kind>`,
+      };
+    }
+    const resolvedKind = matches[0].kind;
+    const rels = [...new Set(matches.map((match) => match.rel))].sort();
+    return { kind: resolvedKind, terms: rels, label: rels.join(", ") };
+  }
+
+  if (matches.length === 0) {
+    return {
+      error: `No auto-discovered ${kind} matches "${request.target}". Auto-discovered means a file under the agent dir, ~/.agents/skills, or .pi/ - resources a package provides follow that package's own whitelist, so name the package instead.`,
+    };
+  }
+  const rels = [...new Set(matches.map((match) => match.rel))].sort();
+  return { kind, terms: rels, label: rels.join(", ") };
+}
+
+function samePackageTerm(term: string, target: string): boolean {
+  return packageSourceMatches(target, term);
+}
+
+/** Add exclude terms that do not already cover these targets. Returns whether anything was added. */
+function addExcludeTerms(profile: Profile, kind: keyof ResourceExclude, terms: string[], covers: (target: string, term: string) => boolean): boolean {
+  const existing = profile.exclude?.[kind] ?? [];
+  const missing = terms.filter((term) => !existing.some((entry) => entry === term || covers(term, entry)));
+  if (missing.length === 0) return false;
+  profile.exclude = { ...profile.exclude, [kind]: [...existing, ...missing] };
+  return true;
+}
+
+function dropMatchingTerms(terms: string[], targets: string[], covers: (target: string, term: string) => boolean): string[] {
+  return terms.filter((term) => !targets.some((target) => covers(target, term)));
+}
+
+export interface InstallPolicyResult {
+  profiles: Record<string, Profile>;
+  changes: string[];
+}
+
+/**
+ * Make `target` loadable only in `only`, keeping each profile's existing style:
+ *
+ * - A baseline profile (`base`, an unoverridden `default`) already loads everything, so it
+ *   needs no whitelist - only an exclusion when it is not in `only`.
+ * - A profile with a whitelist gets the target appended, or removed from it.
+ * - A profile that is "everything except these" (exclude only) just loses the exclusion.
+ * - A profile that starts from nothing gets a whitelist holding exactly the target.
+ *
+ * `base` is never given a whitelist: it is the pristine snapshot, and a package installed
+ * after the snapshot was not part of it.
+ */
+export function applyInstallPolicy(
+  profiles: Record<string, Profile>,
+  target: InstallTarget,
+  only: string[],
+): InstallPolicyResult {
+  const next: Record<string, Profile> = {};
+  const changes: string[] = [];
+  const covers = target.kind === "packages" ? samePackageTerm : (rel: string, term: string) => resourceTermMatches(rel, term);
+
+  for (const [name, profile] of Object.entries(profiles)) {
+    const updated: Profile = { ...profile };
+    const inOnly = only.includes(name);
+    const key = target.kind === "packages" ? "packages" : target.kind;
+
+    if (inOnly) {
+      const whitelist = updated[key];
+      if (target.kind === "packages" && whitelist === undefined) {
+        // No package whitelist means "everything known", which already covers the new package.
+      } else if (whitelist !== undefined) {
+        const missing = target.terms.filter((term) => !whitelist.some((entry) => covers(term, entry)));
+        if (missing.length > 0) {
+          updated[key] = [...whitelist, ...missing];
+          changes.push(`profile "${name}": whitelist now includes ${target.label}`);
+        }
+      } else if ((updated.exclude?.[key]?.length ?? 0) > 0) {
+        // An exclude-only profile already loads it unless something excludes it.
+        const before = updated.exclude![key] ?? [];
+        const kept = dropMatchingTerms(before, target.terms, covers);
+        if (kept.length !== before.length) {
+          updated.exclude = { ...updated.exclude, [key]: kept };
+          changes.push(`profile "${name}": exclusion of ${target.label} removed`);
+        }
+      } else if (!isBaselineProfile(name, profile)) {
+        // A profile that starts from nothing needs a whitelist holding exactly this.
+        updated[key] = [...target.terms];
+        changes.push(`profile "${name}": whitelist created with ${target.label}`);
+      }
+    } else {
+      const added = addExcludeTerms(updated, key, target.terms, covers);
+      const whitelist = updated[key];
+      let dropped = 0;
+      if (whitelist !== undefined) {
+        const kept = dropMatchingTerms(whitelist, target.terms, covers);
+        if (kept.length !== whitelist.length) {
+          updated[key] = kept;
+          dropped = whitelist.length - kept.length;
+        }
+      }
+      if (added || dropped > 0) changes.push(`profile "${name}": ${target.label} excluded`);
+    }
+
+    next[name] = updated;
+  }
+
+  return { profiles: next, changes };
+}
+
 export function parseModelSpec(spec: string): { provider?: string; modelId: string } {
   const trimmed = spec.trim();
   const slash = trimmed.indexOf("/");
@@ -993,7 +1199,7 @@ export function knownProfilesHint(store: Store): string {
 /* Extension                                                                   */
 /* -------------------------------------------------------------------------- */
 
-const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "revert-session", "doctor", "help"] as const;
+const SUBCOMMANDS = ["list", "show", "save", "delete", "refresh", "restore", "install", "revert-session", "doctor", "help"] as const;
 /**
  * Internal subcommand. `session_start` has no reload handle, so a start revert asks for a
  * reload by sending this as a user message: a command handler does have one.
@@ -1217,6 +1423,7 @@ async function handleSwitch(
   if (sub === "revert-session") return handleRevertSession(env, tokens[1]);
   if (sub === REVERT_RELOAD_SUB) return handleRevertReload(env);
   if (sub === "restore") return handleRestore(env);
+  if (sub === "install") return handleInstall(env, tokens.slice(1));
   if (sub === "save") return handleSave(env, tokens[1]);
   if (sub === "delete") return handleDelete(env, tokens[1]);
   if (sub === "show") return showProfile(store, tokens[1], currentSettings, agentDir, packageRoot, ctx);
@@ -1233,6 +1440,9 @@ function handleHelp(env: SwitchEnv): void {
       "/switch save <profile>     capture the current settings as a profile",
       "/switch refresh            re-capture the base snapshot from settings.json",
       "/switch restore            undo the last switch",
+      "/switch install <target> [--only <profiles>] [--kind <kind>]   add a package, or retarget one resource",
+      "/switch install npm:foo --only coding,notes   install it and let only those profiles load it",
+      "/switch install skills/novel-writer --only notes   tag an existing local resource the same way",
       "/switch delete <profile>   remove a profile",
       "/switch doctor             what this session actually has: model, tools, drift",
       "/switch revert-session <start|end|off>   revert to the default configuration at session start or close",
@@ -1456,6 +1666,11 @@ async function handleRestore(env: SwitchEnv): Promise<void> {
   saveUndo(undefined, env.agentDir);
   const changes = diffSettings(currentSettings, snapshot.settings);
   writeManagedSettings(settingsPath, snapshot.settings);
+  if (snapshot.profiles !== undefined) {
+    // An install changed which profiles may load something, not only the settings file.
+    store.profiles = snapshot.profiles;
+    changes.push(`profiles put back as they were before (${Object.keys(snapshot.profiles).length} profiles)`);
+  }
   const backTo = restoreActiveProfile(snapshot.fromProfile, store.profiles);
   store.activeProfile = backTo;
   saveStore(store, env.agentDir);
@@ -1574,11 +1789,7 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
   }
 
   // Guard: project-level settings can shadow the global values we are writing.
-  const projectSettingsPath = join(ctx.cwd, PROJECT_DIR_NAME, SETTINGS_FILE_NAME);
-  const projectSettings = captureManagedSettings(readJsonFile(projectSettingsPath));
-  const shadowed = MANAGED_KEYS.filter(
-    (key) => (projectSettings as Record<string, unknown>)[key] !== undefined && key !== "theme",
-  );
+  const shadowed = shadowedProjectKeys(ctx);
   if (shadowed.length > 0) {
     ctx.ui.notify(`/switch: project .pi/settings.json overrides ${shadowed.join(", ")}; those values win`, "warning");
   }
@@ -1594,6 +1805,101 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
   saveStore(store, env.agentDir);
 
   await reloadWithSummary(ctx, `profile "${name}"`, changes);
+}
+
+/** Keys that a project-level .pi/settings.json would override for this cwd. */
+function shadowedProjectKeys(ctx: ExtensionCommandContext): string[] {
+  const projectSettings = captureManagedSettings(readJsonFile(join(ctx.cwd, PROJECT_DIR_NAME, SETTINGS_FILE_NAME)));
+  return MANAGED_KEYS.filter((key) => (projectSettings as Record<string, unknown>)[key] !== undefined && key !== "theme");
+}
+
+/**
+ * `/switch install <target> [--only <profiles>] [--kind <kind>]`
+ *
+ * pi's own `pi install` has a fixed option set and rejects anything an extension registered,
+ * so profile targeting has to happen here: the package entry goes into settings.json (pi
+ * installs a missing npm/git source while resolving after the reload), and each profile is
+ * rewritten so only the named ones are allowed to load it.
+ */
+async function handleInstall(env: SwitchEnv, tokens: string[]): Promise<void> {
+  const { ctx, store, settingsPath, currentSettings, agentDir } = env;
+  const parsed = parseInstallArgs(tokens);
+  if ("error" in parsed) {
+    ctx.ui.notify(`/switch install: ${parsed.error} Try: /switch install npm:foo --only coding,notes`, "error");
+    return;
+  }
+  const target = resolveInstallTarget(parsed, agentDir, ctx.cwd);
+  if ("error" in target) {
+    ctx.ui.notify(`/switch install: ${target.error}`, "error");
+    return;
+  }
+  const unknown = parsed.only.filter((name) => store.profiles[name] === undefined);
+  if (unknown.length > 0) {
+    ctx.ui.notify(`/switch install: unknown profile ${unknown.join(", ")}. Known profiles: ${knownProfilesHint(store)}`, "error");
+    return;
+  }
+
+  if (parsed.only.length === 0 && target.kind !== "packages") {
+    // Without --only there is nothing to change: profiles that keep everything already load
+    // it, and a strict profile stays strict.
+    ctx.ui.notify(
+      `/switch install: ${target.label} is already loaded by every profile that keeps everything. Add --only <profiles> to restrict it.`,
+      "info",
+    );
+    return;
+  }
+
+  const beforeProfiles: Record<string, Profile> = { ...store.profiles };
+  const policy = applyInstallPolicy(store.profiles, target, parsed.only);
+  store.profiles = policy.profiles;
+
+  // A package installed after the base snapshot has to be in the known set before the
+  // per-profile policy is written, or no profile could enable it.
+  const settingsInput: ManagedSettings = { ...currentSettings };
+  if (target.kind === "packages") {
+    const known = mergePackageSets(store.base.packages, currentSettings.packages);
+    const missing = target.terms.filter((term) => !known.some((entry) => packageSourceMatches(entry, term)));
+    settingsInput.packages = [...known, ...missing];
+  }
+
+  // Installing does not switch profiles, but the active profile's allowances may have just
+  // changed, so its settings have to be rewritten.
+  const activeName = store.activeProfile ?? BASE_PROFILE_NAME;
+  let resolved: { profile: Profile; chain: string[] };
+  try {
+    resolved = resolveProfile(activeName, store.profiles);
+  } catch {
+    resolved = { profile: {}, chain: [] };
+  }
+  const nextSettings = buildProfileSettings(store.base, resolved.profile, {
+    settingsBaseDir: agentDir,
+    packageRoot: env.packageRoot,
+    cwd: ctx.cwd,
+    profileName: activeName,
+  }, settingsInput);
+
+  const changes = [...policy.changes, ...diffSettings(currentSettings, nextSettings)];
+  if (parsed.only.length > 0) changes.unshift(`enabled only in: ${parsed.only.join(", ")}`);
+  if (target.kind === "packages") changes.push("(a missing npm/git source is installed while reloading)");
+  const shadowed = shadowedProjectKeys(ctx);
+  if (shadowed.length > 0) {
+    ctx.ui.notify(`/switch install: project .pi/settings.json overrides ${shadowed.join(", ")}; those values win`, "warning");
+  }
+
+  const previous = writeManagedSettings(settingsPath, nextSettings);
+  saveUndo({
+    at: new Date().toISOString(),
+    fromProfile: store.activeProfile ?? null,
+    toProfile: store.activeProfile ?? "(none)",
+    settings: previous,
+    profiles: beforeProfiles,
+  }, agentDir);
+  saveStore(store, env.agentDir);
+  await reloadWithSummary(
+    ctx,
+    `install ${target.kind === "packages" ? target.label : `${target.kind}: ${target.label}`}`,
+    changes,
+  );
 }
 
 async function reloadWithSummary(ctx: ExtensionCommandContext, label: string, changes: string[]): Promise<void> {

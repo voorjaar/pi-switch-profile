@@ -45,6 +45,7 @@ If you edit `settings.json` by hand, run `/reload` afterwards.
 | `/switch save <profile>` | Capture the current configuration as a new profile |
 | `/switch refresh` | Re-capture the base snapshot from `settings.json` (do this after installing a package by hand) |
 | `/switch restore` | Undo the last switch (the record lives in `~/.pi/agent/pi-switch-undo.json`) |
+| `/switch install <target> [--only <profiles>] [--kind <kind>]` | Add a package, or retarget a resource so only the named profiles may load it |
 | `/switch revert-session <start\|end\|off\|status>` | When the session returns to the default configuration (default: `start`) |
 | `/switch delete <profile>` | Remove a profile |
 | `/switch doctor` | Show what the live session actually has: model, thinking level, active and configured tools, and whether settings match the active profile |
@@ -143,11 +144,42 @@ To keep an extension out of `default` but on in one profile, give `default` an `
 
 `/switch default` then loads everything except `review`; `/switch review` loads only what it lists.
 
+### Installing into one profile
+
+pi's own `pi install` parses a fixed set of options (`-l`, `-a`, `-na`, `-h`, and `update`'s own), and rejects
+anything an extension registers - `pi.registerFlag()` only reaches a running session. And pi has no notion of a
+profile: a package lives in `settings.json` and nothing else. So the targeting happens here:
+
+```bash
+/switch install npm:pi-simplify --only review          # install it, let only "review" load it
+/switch install pi-terminal-theme --only coding,notes  # retarget an already installed package
+/switch install skills/novel-writer --only notes       # retarget a local skill
+/switch install extensions/review.ts                   # no --only: every profile that keeps everything loads it
+```
+
+`<target>` is a package source (`npm:…`, `git:…`, `http(s):…`, or a path) or a resource name. A bare name is
+matched against the auto-discovered resources (the agent dir, `~/.agents/skills`, the project `.pi/`): a name that
+matches nothing is taken to be a package source, and a name that matches several kinds has to be narrowed with
+`--kind extensions|skills|prompts|themes|packages`.
+
+Each profile is rewritten in the style it already has, so installing never turns a "keep everything" profile into
+a whitelist one:
+
+- a baseline profile (`base`, an unoverridden `default`) only gains an `exclude` entry when it is not named;
+- a whitelist profile named by `--only` gains the target, one that is not named loses it from its whitelist and
+  gains an exclusion;
+- a profile written as "everything except these" just loses the exclusion;
+- a profile that starts from nothing gains a whitelist holding exactly the target.
+
+The package entry is written into `settings.json`, and pi installs a missing `npm:` or `git:` source while
+resolving after the reload. `/switch restore` undoes an install completely: the settings *and* the profiles map,
+which is why the undo record for an install also stores the profiles.
+
 ### Base, save, and refresh
 
 `base` is the snapshot of `settings.json` that every profile overlays. Capture it while no profile is active:
 
-- `/switch save my-setup` records the current configuration as a profile you can return to. Profile names must be typeable as `/switch <name>`, so `base` and the subcommand names (`list`, `show`, `save`, `delete`, `refresh`, `restore`, `revert-session`, `doctor`, `help`) are reserved.
+- `/switch save my-setup` records the current configuration as a profile you can return to. Profile names must be typeable as `/switch <name>`, so `base` and the subcommand names (`list`, `show`, `save`, `delete`, `refresh`, `restore`, `install`, `revert-session`, `doctor`, `help`) are reserved.
 - `/switch refresh` re-reads `settings.json` into `base`. Run it when you want the *enablement* snapshot to follow what `pi config` currently says.
 
 ### What a switch writes

@@ -6,6 +6,16 @@ All notable changes to pi-switch-profile are documented here.
 
 ### Added
 
+- Added `/switch install <target> [--only <profiles>] [--kind <kind>]`. pi's own `pi install` parses a fixed option
+  set and rejects options an extension registers (`pi.registerFlag()` only reaches a running session), and pi has
+  no profile concept at all, so profile targeting lives here: the package entry is written into `settings.json`
+  (pi installs a missing `npm:`/`git:` source while resolving after the reload), and every profile is rewritten so
+  only the named ones may load it - a baseline profile gains an `exclude` entry, a whitelist profile gains or
+  loses the term, an exclude-only profile loses its exclusion, and a profile that starts from nothing gains a
+  whitelist holding exactly the target. A bare target is resolved against the auto-discovered resources, an
+  ambiguous one asks for `--kind`, and one that matches nothing is taken to be a package source.
+  `/switch restore` undoes an install completely, which is why its undo record now also stores the profiles map.
+
 - Added `exclude` to profiles: what to throw away per resource kind, for example
   `"exclude": { "extensions": ["review"], "skills": ["archive"] }`. On its own it means "everything except
   these", so `default` can keep everything but one extension; combined with a whitelist of the same kind it

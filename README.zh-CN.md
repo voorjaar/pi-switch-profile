@@ -45,6 +45,7 @@ pi -e ./extensions/switch.ts
 | `/switch save <profile>` | 把当前配置捕获为一个新的配置档 |
 | `/switch refresh` | 从 `settings.json` 重新捕获基线快照（手动安装某个包之后建议执行） |
 | `/switch restore` | 撤销上一次切换（记录在 `~/.pi/agent/pi-switch-undo.json`） |
+| `/switch install <目标> [--only <配置档>] [--kind <种类>]` | 装一个包，或把某个资源改成只有指定配置档能加载 |
 | `/switch revert-session <start\|end\|off\|status>` | 会话何时回到默认配置（默认 `start`） |
 | `/switch delete <profile>` | 删除一个配置档 |
 | `/switch doctor` | 显示当前会话真实状态：模型、思考等级、激活与已配置的工具，以及设置是否与当前配置档一致 |
@@ -137,11 +138,33 @@ pi -e ./extensions/switch.ts
 
 `/switch default` 会加载除 `review` 以外的全部；`/switch review` 只加载它列出的那些。
 
+### 只装到某个配置档
+
+pi 自己的 `pi install` 只认一组固定的选项（`-l`、`-a`、`-na`、`-h`，以及 `update` 自己那几个），扩展注册的选项会被拒——`pi.registerFlag()` 只能被正在运行的会话读到。而 pi 本身没有“配置档”这个概念：一个包只存在于 `settings.json` 里。所以归属的判定只能在这里做：
+
+```bash
+/switch install npm:pi-simplify --only review          # 装它，并且只让 review 加载
+/switch install pi-terminal-theme --only coding,notes  # 给已经装好的包改归属
+/switch install skills/novel-writer --only notes       # 给本地技能改归属
+/switch install extensions/review.ts                   # 不写 --only：凡是“全开”的配置档都会加载它
+```
+
+`<目标>` 是一个包来源（`npm:…`、`git:…`、`http(s):…` 或一个路径），或者一个资源名。裸着的名字会拿去跟自动发现的资源匹配（agent 目录、`~/.agents/skills`、项目的 `.pi/`）：一个都匹配不上就当它是包来源，匹配到多种种类时就必须用 `--kind extensions|skills|prompts|themes|packages` 说清楚是哪一种。
+
+每个配置档都按它本来的写法改，所以安装不会把一个“全开”的配置档变成白名单档：
+
+- 基线配置档（`base`，以及没有资源覆盖项的 `default`）不在 `--only` 里时只多一条 `exclude`；
+- 有白名单的配置档被 `--only` 点名时白名单多一项，没被点名时从白名单里去掉并且多一条排除；
+- 写成“除了这些全都开”的配置档只是少掉那条排除；
+- 从空开始的配置档得到一个正好是目标的白名单。
+
+包条目会写进 `settings.json`，缺少的 `npm:` 或 `git:` 来源在 reload 后的 resolve 过程中由 pi 装好。`/switch restore` 能完整撤销一次安装：设置和配置档映射都回到之前，这也是为什么安装的撤销记录里连配置档一起存。
+
 ### 基线、save 与 refresh
 
 `base` 是每个配置档叠加其上的 `settings.json` 快照。请在没有配置档生效时捕获它：
 
-- `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。配置档名称必须能作为 `/switch <name>` 输入，因此 `base` 以及子命令名（`list`、`show`、`save`、`delete`、`refresh`、`restore`、`revert-session`、`doctor`、`help`）是保留的。
+- `/switch save my-setup` 把当前配置记录成一个可以返回的配置档。配置档名称必须能作为 `/switch <name>` 输入，因此 `base` 以及子命令名（`list`、`show`、`save`、`delete`、`refresh`、`restore`、`install`、`revert-session`、`doctor`、`help`）是保留的。
 - `/switch refresh` 重新读取 `settings.json` 并更新 `base`。当你希望“启用状态”的快照跟随 `pi config` 的当前结果时执行一次。
 
 ### 切换时写入的是什么

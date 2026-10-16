@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -148,6 +148,17 @@ async function main() {
     writeFileSync(path, `${JSON.stringify(storeFile, null, 2)}\n`, "utf8");
   }
   log(`backed up settings.json and installed ${repoRoot} (${installed.packages.length} packages)`);
+
+  // A real auto-discovered extension, so /switch install can target it and its registered
+  // command can prove the reload actually applied the exclusion.
+  const probeExtPath = join(agentDir, "extensions", "zzz-switch-live.ts");
+  mkdirSync(join(agentDir, "extensions"), { recursive: true });
+  const probeExisted = existsSync(probeExtPath);
+  writeFileSync(
+    probeExtPath,
+    "export default function (pi) {\n  pi.registerCommand(\"zzz-switch-live\", { description: \"pi-switch-profile live test probe\", handler: async () => {} });\n}\n",
+    "utf8",
+  );
 
   activeChild = spawn("pi", ["--mode", "rpc"], {
     cwd: repoRoot,
@@ -396,6 +407,117 @@ async function main() {
       (afterExclude.packages ?? []).length,
     );
 
+    /*
+     * /switch install: make one resource loadable only in named profiles. The probe extension
+     * is a real auto-discovered resource, so its registered command proves the reload applied
+     * the exclusion, and /switch restore has to put both the settings and the profiles back.
+     */
+    await runSlash("/switch default");
+    await waitFor(
+      () => lastNotification((text) => text.includes('profile "default"')) !== undefined,
+      120_000,
+      "switch default before the install checks",
+    );
+    const commandNames = async () => {
+      const response = await send({ type: "get_commands" }, 120_000);
+      return (response.data?.commands ?? []).map((command) => command.name);
+    };
+    const namesBeforeInstall = await commandNames();
+    check("the probe extension is loaded before the install check", namesBeforeInstall.includes("zzz-switch-live"), namesBeforeInstall.length);
+
+    const storeForInstall = readStore();
+    storeForInstall.profiles = { ...(storeForInstall.profiles ?? {}), keep: { description: "starts from nothing", extensions: [] } };
+    writeFileSync(profileStorePaths[0], JSON.stringify(storeForInstall), "utf8");
+
+    await runSlash("/switch install extensions/zzz-switch-live.ts --only keep");
+    await waitFor(
+      () => lastNotification((text) => text.includes("install extensions/zzz-switch-live.ts")) !== undefined,
+      120_000,
+      "install summary notification",
+    );
+    const storeAfterInstall = readStore();
+    check(
+      "install put the resource in the named profile's whitelist",
+      JSON.stringify(storeAfterInstall.profiles?.keep?.extensions) === JSON.stringify(["extensions/zzz-switch-live.ts"]),
+      storeAfterInstall.profiles?.keep,
+    );
+    check(
+      "install excluded the resource from the other profiles",
+      ["base", "default", "zen"].every((name) => (storeAfterInstall.profiles?.[name]?.exclude?.extensions ?? []).length > 0),
+      Object.entries(storeAfterInstall.profiles ?? {}).map(([name, profile]) => `${name}=${JSON.stringify(profile?.exclude?.extensions ?? [])}`),
+    );
+    const settingsAfterInstall = readSettings().extensions ?? [];
+    check(
+      "the active profile denies exactly that resource and nothing else",
+      settingsAfterInstall.includes("!extensions/zzz-switch-live.ts") && !settingsAfterInstall.includes("!extensions/**"),
+      JSON.stringify(settingsAfterInstall),
+    );
+    const namesAfterInstall = await commandNames();
+    check("the excluded extension stops responding after the reload", !namesAfterInstall.includes("zzz-switch-live"), namesAfterInstall.length);
+    check("/switch survives the install reload", namesAfterInstall.includes("switch"), namesAfterInstall.length);
+
+    await runSlash("/switch restore");
+    await waitFor(() => lastNotification((text) => text.includes("restored")) !== undefined, 120_000, "restore after the install");
+    const storeAfterRestore = readStore();
+    check(
+      "restore puts the profiles map back as it was",
+      JSON.stringify(storeAfterRestore.profiles?.keep?.extensions) === JSON.stringify([])
+        && (storeAfterRestore.profiles?.default?.exclude?.extensions ?? []).length === 0,
+      { keep: storeAfterRestore.profiles?.keep, default: storeAfterRestore.profiles?.default },
+    );
+    const namesAfterRestore = await commandNames();
+    check("the resource is loadable again after restore", namesAfterRestore.includes("zzz-switch-live"), namesAfterRestore.length);
+
+    const themeSource = (readSettings().packages ?? [])
+      .map((entry) => (typeof entry === "string" ? entry : entry?.source))
+      .find((source) => String(source).includes("pi-terminal-theme"));
+    if (themeSource !== undefined) {
+      await runSlash(`/switch install ${themeSource} --only keep`);
+      await waitFor(
+        () => lastNotification((text) => text.includes(`install ${themeSource}`)) !== undefined,
+        120_000,
+        "package install summary notification",
+      );
+      const disabledPackages = (readSettings().packages ?? [])
+        .filter((entry) => typeof entry === "object" && entry !== null && entry.autoload === false)
+        .map((entry) => String(entry.source));
+      check(
+        "install --only disables the package for every other profile",
+        disabledPackages.length === 1 && disabledPackages[0].includes("pi-terminal-theme"),
+        JSON.stringify(disabledPackages),
+      );
+      const storeAfterPackage = readStore();
+      check(
+        "the named profile keeps the package without gaining a whitelist",
+        (storeAfterPackage.profiles?.keep?.exclude?.packages ?? []).length === 0
+          && storeAfterPackage.profiles?.keep?.packages === undefined,
+        storeAfterPackage.profiles?.keep,
+      );
+      await runSlash("/switch restore");
+      await waitFor(() => lastNotification((text) => text.includes("restored")) !== undefined, 120_000, "restore after the package install");
+      check(
+        "restore re-enables the package",
+        (readSettings().packages ?? []).every((entry) => typeof entry === "string"),
+        JSON.stringify(readSettings().packages ?? []).slice(0, 200),
+      );
+    } else {
+      check("package install check needs pi-terminal-theme installed", false, "not in settings.json");
+    }
+
+    await runSlash("/switch install zzz-switch-live");
+    check(
+      "install without --only explains that nothing needed changing",
+      lastNotification((text) => text.includes("already loaded by every profile")) !== undefined,
+      notifications.slice(-1)[0],
+    );
+    await runSlash("/switch install npm:definitely-not-installed --only nosuchprofile");
+    check("install rejects an unknown profile", lastNotification((text) => text.includes("unknown profile")) !== undefined, notifications.slice(-1)[0]);
+    check(
+      "a rejected install wrote no package entry",
+      (readSettings().packages ?? []).every((entry) => !String(typeof entry === "string" ? entry : entry?.source).includes("definitely-not-installed")),
+      JSON.stringify(readSettings().packages ?? []).slice(0, 200),
+    );
+
     // A profile created by /switch save must be switchable, and restore must undo exactly one switch.
     await runSlash("/switch save last");
     check("save reports the second saved profile", lastNotification((text) => text.includes('saved profile "last"')) !== undefined, notifications.slice(-1)[0]);
@@ -570,6 +692,7 @@ async function main() {
       }
     }
     log("restored the original profile store");
+    if (!probeExisted && existsSync(probeExtPath)) unlinkSync(probeExtPath);
   }
 
   const failures = results.filter((result) => !result.ok);
