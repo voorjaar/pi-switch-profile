@@ -127,11 +127,21 @@ is the same rule applied to the exact settings recorded before the switch.
 ## Development
 
 ```bash
+npm install                  # only for the scripts below (tsc); the extension itself needs no dependencies
 npm test                     # pure-logic self-test (profile resolution, package policy, settings writes)
-node scripts/live-test.mjs   # live smoke test: real pi in RPC mode, /switch zen, tools after reload, /switch restore
+npm run test:live            # live smoke test: real pi in RPC mode, zen, tools after reload, save/restore/refresh
+npm run check                # type-check
 ```
 
-`scripts/live-test.mjs` installs this package into a backed-up `~/.pi/agent/settings.json`, runs a real pi in RPC mode, switches to `zen`, checks the file and the reloaded session (registered commands, active tools, tools from disabled packages), restores the previous settings, and finally puts the original settings back.
+`selftest.ts` imports `extensions/switch.ts` directly with `node --experimental-strip-types`, so it needs no
+pi runtime: the extension imports pi types only. `npm run check` resolves those types through `tsconfig.json`
+`paths`, which point at an installed pi release (`~/.pi/agent/install/releases/<version>/node_modules/...`) —
+pi supplies those packages to extensions, so they are `peerDependencies`, deliberately not `dependencies`.
+
+`scripts/live-test.mjs` installs this package into a backed-up `~/.pi/agent/settings.json`, runs a real pi in
+RPC mode, switches to `zen`, checks the file and the reloaded session (registered commands, active tools, tools
+from disabled packages), exercises save/list/delete/refresh/restore, and finally puts the original settings and
+the original profile store back.
 
 ## License
 

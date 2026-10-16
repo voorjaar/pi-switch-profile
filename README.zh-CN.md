@@ -123,11 +123,15 @@ pi -e ./extensions/switch.ts
 ## 开发
 
 ```bash
+npm install                  # 只为下面这几个脚本（tsc）；扩展本身不需要依赖
 npm test                     # 纯逻辑自检（配置档解析、包策略、设置写入）
-node scripts/live-test.mjs   # 实跑冒烟测试：真实 pi 的 RPC 模式，/switch zen、reload 后的工具、/switch restore
+npm run test:live            # 实跑冒烟测试：真实 pi 的 RPC 模式，zen、reload 后的工具、save/restore/refresh
+npm run check                # 类型检查
 ```
 
-`scripts/live-test.mjs` 会把本包安装进已备份的 `~/.pi/agent/settings.json`，启动真实 pi（RPC 模式），切到 `zen`，检查文件与 reload 后的会话（注册的命令、激活的工具、被禁用包的工具是否消失），恢复之前的设置，最后把原始配置写回。
+`selftest.ts` 用 `node --experimental-strip-types` 直接导入 `extensions/switch.ts`，因此不需要 pi 运行时：扩展只导入 pi 的类型。`npm run check` 通过 `tsconfig.json` 的 `paths` 解析这些类型，它们指向已安装的 pi 版本（`~/.pi/agent/install/releases/<version>/node_modules/...`）——pi 会把这些包提供给扩展，所以它们列在 `peerDependencies`，故意不写进 `dependencies`。
+
+`scripts/live-test.mjs` 会把本包安装进已备份的 `~/.pi/agent/settings.json`，启动真实 pi（RPC 模式），切到 `zen`，检查文件与 reload 后的会话（注册的命令、激活的工具、被禁用包的工具是否消失），并跑一遍 save/list/delete/refresh/restore，最后把原始设置和原始配置档存储写回。
 
 ## 许可证
 

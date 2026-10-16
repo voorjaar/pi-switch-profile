@@ -1,22 +1,75 @@
 {
   "name": "pi-switch-config",
   "version": "0.1.0",
-  "description": "Switch pi configuration profiles (packages, extensions, skills, themes, model) with /switch and reload",
-  "type": "module",
+  "description": "Switch whole pi configuration profiles with /switch - pi packages, extension, skill, prompt and theme paths, theme, default model, thinking level, default tools - then reload",
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "coding-agent",
+    "switch",
+    "profiles",
+    "configuration",
+    "settings",
+    "packages",
+    "extensions",
+    "skills",
+    "prompts",
+    "themes",
+    "theme",
+    "tools",
+    "reload",
+    "dotfiles",
+    "workflow"
+  ],
   "license": "MIT",
-  "keywords": ["pi-package"],
+  "author": {
+    "name": "voorjaar",
+    "email": "felitas@zoho.com",
+    "url": "https://github.com/voorjaar"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voorjaar/pi-switch-config.git"
+  },
+  "bugs": {
+    "url": "https://github.com/voorjaar/pi-switch-config/issues"
+  },
+  "homepage": "https://github.com/voorjaar/pi-switch-config#readme",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "pi": {
-    "extensions": ["./extensions/switch.ts"]
+    "extensions": [
+      "./extensions/switch.ts"
+    ]
   },
   "files": [
     "extensions/",
+    "scripts/live-test.mjs",
+    "selftest.ts",
+    "tsconfig.json",
     "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node --experimental-strip-types selftest.ts",
+    "test:live": "node scripts/live-test.mjs",
+    "check": "tsc --project tsconfig.json"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
   },
-  "scripts": {
-    "test": "node --experimental-strip-types selftest.ts"
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.2"
   }
 }
