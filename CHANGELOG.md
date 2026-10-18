@@ -78,6 +78,22 @@ All notable changes to pi-switch-profile are documented here.
 
 ### Fixed
 
+- Fixed a profile's `theme` being silently dropped when its provider was switched off. A theme a *package*
+  provides (`terminal` from `pi-terminal-theme`, for example) only exists while that package loads, so a
+  `packages` whitelist or `exclude.packages` that disabled the package left `theme` naming a theme pi could not
+  find, and pi fell back to the system theme. The selected theme now outranks that policy: the package entry is
+  kept as `autoload: false` with a single `+themes/<file>.json` force-include, which is pi's own way of loading
+  one resource out of a disabled package, and the package stays off for everything else. A `light/dark` pair is
+  kept on both halves, an explicit `exclude.themes` entry is honoured instead of overridden, and a theme nothing
+  provides is reported by `/switch show`, `/switch list`, `/switch doctor`, and the switch summary. Local themes
+  in `~/.pi/agent/themes/` were never at risk - pi reads that directory regardless of the `themes` filter - and
+  `system`, `dark`, and `light` cannot be switched off at all.
+- Fixed the live test suite (`node scripts/live-test.mjs`) reporting failures for configurations it did not
+  create. Six checks assumed a pristine `settings.json` - "every package entry is a plain string" - so a `default`
+  profile that deliberately keeps a package off (`exclude.packages`), or a `base` snapshot captured while another
+  profile was active, made them fail with no product bug behind them. They now assert that nothing is disabled
+  which the live `default` profile did not choose to disable, and compare the package set by source rather than by
+  entry form.
 - Fixed `/switch restore` re-activating a profile that had been deleted since the switch: the footer no longer
   names a profile that does not exist, and the report says the settings were restored from a since-deleted profile.
 - Fixed profile switches being sticky: a managed key that neither the profile nor the base snapshot defines is

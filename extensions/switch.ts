@@ -363,12 +363,20 @@ function hasResourceFilter(entry: PackageSource): boolean {
 /** Drop `autoload: false` so the profile policy alone decides enablement. */
 function enabledForm(entry: PackageSource): PackageSource {
   if (typeof entry === "string") return entry;
+  // A theme force-include this extension wrote does not have to survive an enabled package: pi's
+  // own package filter treats `+path` as a no-op when the type is loaded anyway, and dropping it
+  // keeps switching idempotent (disable writes it, enable takes it back off).
+  let keptThemes: string[] | undefined = entry.themes;
+  // A themes list that is nothing but the force-includes this extension wrote is not the user's
+  // filter: the package is enabled, and pi reads `themes: []` as "no themes of this type", so the
+  // key has to go rather than stay behind as an empty array.
+  if (keptThemes !== undefined && keptThemes.length > 0 && keptThemes.every(isThemeForceInclude)) keptThemes = undefined;
   const filter: PackageFilter = {
     source: entry.source,
     ...(entry.extensions !== undefined ? { extensions: entry.extensions } : undefined),
     ...(entry.skills !== undefined ? { skills: entry.skills } : undefined),
     ...(entry.prompts !== undefined ? { prompts: entry.prompts } : undefined),
-    ...(entry.themes !== undefined ? { themes: entry.themes } : undefined),
+    ...(keptThemes !== undefined ? { themes: keptThemes } : undefined),
   };
   return filter.extensions === undefined && filter.skills === undefined && filter.prompts === undefined && filter.themes === undefined
     ? entry.source
@@ -636,6 +644,189 @@ export function isBaselineProfile(name: string, profile: Profile): boolean {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Theme availability                                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * pi's own themes: the generated `system` theme and the shipped `dark`/`light` pair. They are not
+ * resources, so no profile setting can switch them off.
+ */
+export const BUILTIN_THEME_NAMES = ["system", "dark", "light"];
+
+/**
+ * A `theme` value is either one theme name or a `light/dark` pair pi chooses between by terminal
+ * appearance. Both halves have to be loadable.
+ */
+export function themeSettingNames(themeSetting: string): string[] {
+  return themeSetting.split("/").map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+/**
+ * Where pi installs a package source (user scope), mirroring pi's own install roots: `npm:` under
+ * `<agent-dir>/npm/node_modules`, `git:` under `<agent-dir>/git/<host>/<path>`, and a local source
+ * relative to the settings file's directory.
+ */
+export function packageInstallDir(entry: PackageSource, settingsBaseDir: string): string | undefined {
+  const source = packageSourceString(entry).trim();
+  if (source.length === 0) return undefined;
+  if (source.startsWith("npm:")) {
+    const spec = source.slice("npm:".length);
+    // npm:pi-lens, npm:@scope/name, npm:pi-lens@1.2.3
+    const at = spec.startsWith("@") ? spec.indexOf("@", 1) : spec.indexOf("@");
+    const name = at > 0 ? spec.slice(0, at) : spec;
+    return name.length === 0 ? undefined : join(settingsBaseDir, "npm", "node_modules", name);
+  }
+  if (source.startsWith("git:")) {
+    const rest = source.slice("git:".length);
+    const at = rest.lastIndexOf("@");
+    const path = at > 0 ? rest.slice(0, at) : rest;
+    return path.length === 0 ? undefined : join(settingsBaseDir, "git", path);
+  }
+  if (/^(https?:|file:)/.test(source)) return undefined;
+  return isAbsolute(source) ? resolve(source) : resolve(settingsBaseDir, expandTilde(source));
+}
+
+export interface ThemeFile {
+  /** The name pi registers the theme under: its `name` field, or the file name without `.json`. */
+  name: string;
+  /** Path relative to the package root, for example `themes/terminal.json`. */
+  rel: string;
+}
+
+function themeNameIn(dir: string, rel: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, rel), "utf8")) as unknown;
+    if (parsed !== null && typeof parsed === "object") {
+      const name = (parsed as Record<string, unknown>).name;
+      if (typeof name === "string" && name.trim().length > 0) return name.trim();
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The themes a package provides: the files in its `themes/` directory, plus any `.json` its pi
+ * manifest names. Package themes reach pi only through the resource loader, so a disabled package
+ * means those theme names no longer exist.
+ */
+export function packageThemeFiles(entry: PackageSource, settingsBaseDir: string): ThemeFile[] {
+  const dir = packageInstallDir(entry, settingsBaseDir);
+  if (dir === undefined) return [];
+  const out: ThemeFile[] = [];
+  const seen = new Set<string>();
+  const add = (rel: string): void => {
+    if (!rel.endsWith(".json") || seen.has(rel)) return;
+    const fallback = (rel.split("/").pop() ?? rel).replace(/\.json$/, "");
+    out.push({ name: themeNameIn(dir, rel) ?? fallback, rel });
+    seen.add(rel);
+  };
+  try {
+    for (const item of readdirSync(join(dir, "themes"))) if (item.endsWith(".json")) add(`themes/${item}`);
+  } catch {
+    // No themes directory; the manifest may still name some.
+  }
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { pi?: Record<string, unknown> };
+    const entries = manifest?.pi?.themes;
+    if (Array.isArray(entries)) {
+      for (const item of entries) {
+        if (typeof item !== "string" || item.length === 0 || /^[!+-]/.test(item)) continue;
+        add(item.replace(/^\.\/+/, "").split("\\").join("/"));
+      }
+    }
+  } catch {
+    // No readable package.json.
+  }
+  // Sorted so a written settings file is stable no matter what order the directory reports in.
+  return out.sort((a, b) => a.rel.localeCompare(b.rel));
+}
+
+/**
+ * A theme pi can load with no package involved. pi's own theme loader falls back to
+ * `<agent-dir>/themes/<name>.json`, and its theme picker lists that directory regardless of the
+ * `themes` settings filter - so a local theme survives `!themes/**`.
+ */
+export function customThemeFileExists(name: string, agentDir: string): boolean {
+  if (name.length === 0 || name.includes("/")) return false;
+  return existsSync(join(agentDir, "themes", `${name}.json`));
+}
+
+/** A theme force-include this extension wrote into a package entry. */
+export function isThemeForceInclude(pattern: string): boolean {
+  return /^\+themes\/[^*?]+\.json$/.test(pattern);
+}
+
+function themeForceIncludes(entry: PackageSource): string[] {
+  return typeof entry === "object" ? (entry.themes ?? []).filter(isThemeForceInclude) : [];
+}
+
+/** A package entry as a settings summary line, naming the theme a disabled entry still loads. */
+function describePackageEntry(entry: PackageSource): string {
+  const kept = themeForceIncludes(entry).map((pattern) => pattern.replace(/^\+themes\//, "").replace(/\.json$/, ""));
+  return kept.length > 0 ? `${packageSourceString(entry)} (theme ${kept.join(", ")} kept)` : packageSourceString(entry);
+}
+
+/**
+ * Make the theme a profile selects loadable.
+ *
+ * A theme is two things at once: a resource pi discovers, and a name `settings.theme` points at.
+ * The `themes` whitelist only filters auto-discovered files, and pi reads `<agent-dir>/themes/`
+ * directly anyway, so the themes a profile can really lose are the ones a package provides:
+ * `exclude.packages` or a `packages` whitelist turns the package off, and `theme` is left naming
+ * something that no longer exists - pi then falls back to the system theme.
+ *
+ * A package the profile turns off is therefore kept *for the selected theme only*: `autoload: false`
+ * plus a `+themes/<file>.json` entry, which is pi's own way of loading one resource out of a
+ * disabled package. A theme the profile explicitly excludes is honoured instead, and a theme nothing
+ * provides is reported.
+ */
+export function keepSelectedTheme(
+  packages: PackageSource[],
+  profile: Profile,
+  themeSetting: string | undefined,
+  settingsBaseDir: string,
+): { packages: PackageSource[]; notes: string[] } {
+  if (themeSetting === undefined) return { packages, notes: [] };
+  const excluded = profile.exclude?.themes ?? [];
+  const notes: string[] = [];
+  // One pass per theme name, but the force-includes are collected per package and written once:
+  // a `light/dark` pair whose two themes come from the same package has to keep both.
+  const forced = new Map<number, Set<string>>();
+
+  for (const name of themeSettingNames(themeSetting)) {
+    if (BUILTIN_THEME_NAMES.includes(name)) continue;
+    if (excluded.some((term) => resourceTermMatches(`themes/${name}.json`, term))) {
+      notes.push(`theme "${name}" is excluded by this profile: pi falls back to the system theme`);
+      continue;
+    }
+    if (customThemeFileExists(name, settingsBaseDir)) continue;
+    const index = packages.findIndex((entry) => packageThemeFiles(entry, settingsBaseDir).some((file) => file.name === name));
+    if (index < 0) {
+      notes.push(`theme "${name}" is not available: no installed package provides it and it is not in <agent-dir>/themes`);
+      continue;
+    }
+    if (!packageIsDisabled(packages[index])) continue;
+    const files = packageThemeFiles(packages[index], settingsBaseDir).filter((file) => file.name === name);
+    const bucket = forced.get(index) ?? new Set<string>();
+    for (const file of files) bucket.add(file.rel);
+    forced.set(index, bucket);
+    notes.push(`theme "${name}" comes from ${packageSourceString(packages[index])}, which this profile turns off - kept for that theme only`);
+  }
+
+  if (forced.size === 0) return { packages, notes };
+  const next = packages.map((candidate, i) => {
+    const rels = forced.get(i);
+    if (rels === undefined) return candidate;
+    const base = typeof candidate === "object" ? candidate : { source: candidate };
+    const kept = (base.themes ?? []).filter((pattern) => !isThemeForceInclude(pattern));
+    return { ...base, autoload: false, themes: [...kept, ...[...rels].sort((a, b) => a.localeCompare(b)).map((rel) => `+${rel}`)] };
+  });
+  return { packages: next, notes };
+}
+
+/* -------------------------------------------------------------------------- */
 /* Install targeting                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -883,11 +1074,12 @@ function mergeProfileOverlay(target: ManagedSettings & Profile, profile: Profile
 export function buildProfileSettings(
   base: ManagedSettings,
   profile: Profile,
-  options: { settingsBaseDir: string; packageRoot: string; cwd?: string; profileName?: string },
+  options: { settingsBaseDir: string; packageRoot: string; cwd?: string; profileName?: string; notes?: string[] },
   currentSettings: ManagedSettings | undefined,
 ): ManagedSettings {
   const current = currentSettings ?? {};
   const next: ManagedSettings = {};
+  const selectedTheme = profile.theme ?? base.theme;
   next.packages = applyPackagePolicy(mergePackageSets(base.packages, current.packages), profile, options);
   // Precedence: profile > base snapshot. Packages are the exception (see
   // mergePackageSets) because pi install/remove change them out of band; every other
@@ -913,7 +1105,11 @@ export function buildProfileSettings(
     }
     next[kind] = buildResourceSetting(kind, whitelist, candidates, { exclude });
   }
-  next.theme = profile.theme ?? base.theme;
+  next.theme = selectedTheme;
+  // The selected theme outranks the resource policy that would otherwise switch it off.
+  const themeKeep = keepSelectedTheme(next.packages ?? [], profile, selectedTheme, options.settingsBaseDir);
+  next.packages = themeKeep.packages;
+  for (const note of themeKeep.notes) options.notes?.push(note);
   next.defaultThinkingLevel = profile.thinkingLevel ?? base.defaultThinkingLevel;
   next.defaultTools = profile.tools ?? base.defaultTools;
 
@@ -943,10 +1139,10 @@ export function summarizeSettings(settings: ManagedSettings): string[] {
   const lines: string[] = [];
   const packages = settings.packages ?? [];
   const enabled = packages.filter((entry) => !packageIsDisabled(entry)).map(packageSourceString);
-  const disabled = packages.filter(packageIsDisabled).map(packageSourceString);
+  const disabled = packages.filter(packageIsDisabled);
   lines.push(`packages: ${enabled.length} enabled${disabled.length ? `, ${disabled.length} disabled` : ""}`);
   if (enabled.length > 0) lines.push(`  on: ${enabled.join(", ")}`);
-  if (disabled.length > 0) lines.push(`  off: ${disabled.join(", ")}`);
+  if (disabled.length > 0) lines.push(`  off: ${disabled.map(describePackageEntry).join(", ")}`);
   for (const key of ["extensions", "skills", "prompts", "themes"] as const) {
     const value = settings[key];
     if (value === undefined) {
@@ -990,7 +1186,7 @@ function formatValue(value: unknown): string {
 export function detectDrift(
   store: Store,
   currentSettings: ManagedSettings,
-  options: { settingsBaseDir: string; packageRoot: string; cwd?: string },
+  options: { settingsBaseDir: string; packageRoot: string; cwd?: string; notes?: string[] },
 ): { profile: string; changes: string[] } | undefined {
   if (store.activeProfile === undefined) return undefined;
   let resolved: { profile: Profile; chain: string[] };
@@ -1372,7 +1568,8 @@ async function showProfile(
     ctx.ui.notify(`/switch show: ${message}. Known profiles: ${knownProfilesHint(store)}`, "error");
     return;
   }
-  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot, cwd: ctx.cwd, profileName: target }, currentSettings);
+  const showNotes: string[] = [];
+  const nextSettings = buildProfileSettings(store.base, resolved.profile, { settingsBaseDir: agentDir, packageRoot, cwd: ctx.cwd, profileName: target, notes: showNotes }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
   const lines = [
     `profile: ${resolved.chain.join(" + ") || BASE_PROFILE_NAME}`,
@@ -1380,6 +1577,7 @@ async function showProfile(
     "",
     "Resolved configuration:",
     ...summarizeSettings(nextSettings),
+    ...(showNotes.length > 0 ? ["", "Theme availability:", ...showNotes.map((note) => `  ${note}`)] : []),
     "",
     "Changes vs current:",
     ...(changes.length > 0 ? changes.map((change) => `  ${change}`) : ["  (none)"]),
@@ -1466,7 +1664,8 @@ function handleList(env: SwitchEnv): void {
     "",
     `revert session: ${store.revertSession ?? "start"}`,
   ];
-  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot, cwd: env.ctx.cwd });
+  const listNotes: string[] = [];
+  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot, cwd: env.ctx.cwd, notes: listNotes });
   if (drift !== undefined) {
     lines.push(
       "",
@@ -1474,6 +1673,7 @@ function handleList(env: SwitchEnv): void {
       ...drift.changes.map((change) => `  ${change}`),
     );
   }
+  if (listNotes.length > 0) lines.push("", "Theme availability:", ...listNotes.map((note) => `  ${note}`));
   showLong(ctx, lines);
 }
 
@@ -1490,12 +1690,14 @@ function handleDoctor(env: SwitchEnv): void {
     `active tools (${activeTools.length}): ${activeTools.join(", ") || "(none)"}`,
     `configured tools (${configuredTools.length}): ${configuredTools.map((tool) => tool.name).join(", ") || "(none)"}`,
   ];
-  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot, cwd: env.ctx.cwd });
+  const doctorNotes: string[] = [];
+  const drift = detectDrift(store, currentSettings, { settingsBaseDir: env.agentDir, packageRoot: env.packageRoot, cwd: env.ctx.cwd, notes: doctorNotes });
   if (drift !== undefined) {
     lines.push("", `Settings differ from profile "${drift.profile}":`, ...drift.changes.map((change) => `  ${change}`));
   } else if (store.activeProfile !== undefined) {
     lines.push("", `Settings match profile "${store.activeProfile}".`);
   }
+  if (doctorNotes.length > 0) lines.push("", "Theme availability:", ...doctorNotes.map((note) => `  ${note}`));
   showLong(ctx, lines);
 }
 
@@ -1776,13 +1978,16 @@ async function handleApply(env: SwitchEnv, name: string): Promise<void> {
     return;
   }
 
+  const notes: string[] = [];
   const nextSettings = buildProfileSettings(store.base, resolved.profile, {
     settingsBaseDir: env.agentDir,
     packageRoot: env.packageRoot,
     cwd: ctx.cwd,
     profileName: name,
+    notes,
   }, currentSettings);
   const changes = diffSettings(currentSettings, nextSettings);
+  changes.push(...notes);
   if (store.revertSession !== "off") {
     // Worth saying on every switch: the profile is only good for this session.
     changes.push(`(revert session is "${store.revertSession ?? "start"}": this switch is undone at session ${store.revertSession === "end" ? "close" : "start"})`);

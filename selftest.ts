@@ -5,22 +5,25 @@
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
   applyInstallPolicy,
   applyPackagePolicy,
+  BUILTIN_THEME_NAMES,
   buildProfileSettings,
   buildResourceSetting,
   captureManagedSettings,
   captureResourceWhitelist,
   collectResourceCandidates,
+  customThemeFileExists,
   defaultConfiguration,
   excludeTermToPatterns,
   diffSettings,
   detectDrift,
   ensureBase,
   isBaselineProfile,
+  isThemeForceInclude,
   isSelfPackageSource,
   legacyResourceToWhitelist,
   LEGACY_STORE_FILE_NAME,
@@ -37,7 +40,10 @@ import {
   type InstallRequest,
   type InstallTarget,
   type ManagedSettings,
+  type PackageFilter,
   type PackageSource,
+  packageInstallDir,
+  packageThemeFiles,
   type Profile,
   packageIsDisabled,
   packageSourceString,
@@ -61,6 +67,7 @@ import {
   seedProfiles,
   SELF_PACKAGE_NAME,
   summarizeSettings,
+  themeSettingNames,
   writeManagedSettings,
 } from "./extensions/switch.ts";
 
@@ -492,6 +499,101 @@ check("zen still keeps itself enabled", (zenDrifted.packages ?? []).some((entry)
 const defaultDrifted = buildProfileSettings(base, resolveProfile("default", profiles).profile, { settingsBaseDir: agentDir, packageRoot }, { ...base, packages: driftedCurrent });
 check("default re-enables everything currently known", (defaultDrifted.packages ?? []).every((entry) => !packageIsDisabled(entry)), defaultDrifted.packages);
 check("default does not resurrect a removed package", (defaultDrifted.packages ?? []).some((entry) => packageSourceMatches(entry, "pi-web-access")) === false, defaultDrifted.packages);
+
+/* ---------------- theme availability ---------------- */
+
+const themeHome = tempDir();
+const themePkgDir = join(themeHome, "npm", "node_modules", "pi-fake-theme");
+mkdirSync(join(themePkgDir, "themes"), { recursive: true });
+writeFileSync(join(themePkgDir, "package.json"), JSON.stringify({ name: "pi-fake-theme", version: "1.0.0" }), "utf8");
+writeFileSync(join(themePkgDir, "themes", "terminal.json"), JSON.stringify({ name: "terminal", colors: {} }), "utf8");
+writeFileSync(join(themePkgDir, "themes", "terminal-tinted.json"), JSON.stringify({ name: "terminal-tinted", colors: {} }), "utf8");
+const manifestPkgDir = join(themeHome, "npm", "node_modules", "pi-manifest-theme");
+mkdirSync(join(manifestPkgDir, "assets"), { recursive: true });
+writeFileSync(join(manifestPkgDir, "package.json"), JSON.stringify({ name: "pi-manifest-theme", pi: { themes: ["assets/ink.json"] } }), "utf8");
+writeFileSync(join(manifestPkgDir, "assets", "ink.json"), JSON.stringify({ name: "ink", colors: {} }), "utf8");
+mkdirSync(join(themeHome, "themes"), { recursive: true });
+writeFileSync(join(themeHome, "themes", "my-local.json"), JSON.stringify({ name: "my-local", colors: {} }), "utf8");
+const themeSelf = join(themeHome, "npm", "node_modules", SELF_PACKAGE_NAME);
+const themeBase: ManagedSettings = { packages: ["npm:pi-fake-theme", "npm:pi-manifest-theme", `npm:${SELF_PACKAGE_NAME}`], theme: "terminal" };
+const themeOptions = { settingsBaseDir: themeHome, packageRoot: themeSelf };
+
+check("npm source resolves to the managed npm install dir", packageInstallDir("npm:pi-fake-theme", themeHome) === themePkgDir, packageInstallDir("npm:pi-fake-theme", themeHome));
+check("a version suffix is stripped from the package name", packageInstallDir("npm:pi-fake-theme@1.2.3", themeHome) === themePkgDir, packageInstallDir("npm:pi-fake-theme@1.2.3", themeHome));
+check("a scoped npm source keeps its scope", packageInstallDir("npm:@scope/pi-lens@1", themeHome) === join(themeHome, "npm", "node_modules", "@scope/pi-lens"));
+check("git source resolves under the git install root", packageInstallDir("git:github.com/acme/pi-lens@v1", themeHome) === join(themeHome, "git", "github.com/acme/pi-lens"));
+check("a local source resolves against the settings dir", packageInstallDir("../elsewhere/pi", themeHome) === resolve(themeHome, "../elsewhere/pi"));
+check(
+  "package themes are read from the themes directory",
+  JSON.stringify(packageThemeFiles("npm:pi-fake-theme", themeHome)) === JSON.stringify([
+    { name: "terminal-tinted", rel: "themes/terminal-tinted.json" },
+    { name: "terminal", rel: "themes/terminal.json" },
+  ]),
+  packageThemeFiles("npm:pi-fake-theme", themeHome),
+);
+check(
+  "a manifest-named theme counts too",
+  JSON.stringify(packageThemeFiles("npm:pi-manifest-theme", themeHome)) === JSON.stringify([{ name: "ink", rel: "assets/ink.json" }]),
+  packageThemeFiles("npm:pi-manifest-theme", themeHome),
+);
+check("a package that is not installed provides no themes", packageThemeFiles("npm:not-installed", themeHome).length === 0);
+check("a theme file in the agent themes dir needs no package", customThemeFileExists("my-local", themeHome) && !customThemeFileExists("terminal", themeHome));
+check("a theme setting can be a light/dark pair", JSON.stringify(themeSettingNames("terminal/terminal-tinted")) === JSON.stringify(["terminal", "terminal-tinted"]));
+check("the built-in themes are named", JSON.stringify(BUILTIN_THEME_NAMES) === JSON.stringify(["system", "dark", "light"]));
+
+const zenTheme: Profile = { packages: [], theme: "terminal" };
+const zenThemeNotes: string[] = [];
+const keptZen = buildProfileSettings(themeBase, zenTheme, { ...themeOptions, notes: zenThemeNotes }, themeBase);
+const keptEntry = (keptZen.packages ?? []).find((entry) => packageSourceMatches(entry, "pi-fake-theme"));
+check(
+  "a profile that turns packages off keeps the theme provider for that theme only",
+  keptEntry !== undefined && packageIsDisabled(keptEntry) && JSON.stringify((keptEntry as PackageFilter).themes) === JSON.stringify(["+themes/terminal.json"]),
+  keptZen.packages,
+);
+check("self is still force-enabled next to it", (keptZen.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, SELF_PACKAGE_NAME)), keptZen.packages);
+check("and the report says which package the theme kept", zenThemeNotes.some((note) => note.includes("pi-fake-theme") && note.includes("terminal")), zenThemeNotes);
+check("a manifest theme is force-included by its own path", JSON.stringify((buildProfileSettings(themeBase, { packages: [], theme: "ink" }, themeOptions, themeBase).packages ?? []).find((entry) => packageSourceMatches(entry, "pi-manifest-theme"))) === JSON.stringify({ source: "npm:pi-manifest-theme", autoload: false, themes: ["+assets/ink.json"] }));
+check(
+  "a light/dark pair keeps both themes",
+  JSON.stringify((buildProfileSettings(themeBase, { packages: [], theme: "terminal/terminal-tinted" }, themeOptions, themeBase).packages ?? []).find((entry) => packageSourceMatches(entry, "pi-fake-theme"))) === JSON.stringify({
+    source: "npm:pi-fake-theme",
+    autoload: false,
+    themes: ["+themes/terminal-tinted.json", "+themes/terminal.json"],
+  }),
+);
+
+const keptAgain = buildProfileSettings(themeBase, zenTheme, themeOptions, keptZen);
+eq("applying the same profile again changes nothing", keptAgain.packages, keptZen.packages);
+eq("so drift detection sees no change either", diffSettings(keptZen, keptAgain), []);
+const enabledAfterKeep = buildProfileSettings(themeBase, { theme: "terminal" }, themeOptions, keptZen);
+check(
+  "a profile that enables the package takes the theme force-include back off",
+  (enabledAfterKeep.packages ?? []).some((entry) => typeof entry === "string" && packageSourceMatches(entry, "pi-fake-theme")),
+  enabledAfterKeep.packages,
+);
+
+const alreadyOnNotes: string[] = [];
+const alreadyOn = buildProfileSettings(themeBase, { theme: "terminal" }, { ...themeOptions, notes: alreadyOnNotes }, themeBase);
+check("a theme whose package is already enabled needs nothing", alreadyOnNotes.length === 0 && (alreadyOn.packages ?? []).some((entry) => !packageIsDisabled(entry) && packageSourceMatches(entry, "pi-fake-theme")), { alreadyOn: alreadyOn.packages, alreadyOnNotes });
+const localNotes: string[] = [];
+buildProfileSettings(themeBase, { theme: "my-local", themes: [] }, { ...themeOptions, notes: localNotes }, themeBase);
+check("a theme under <agent-dir>/themes survives a themes deny-all", localNotes.length === 0, localNotes);
+const builtinNotes: string[] = [];
+buildProfileSettings(themeBase, { packages: [], theme: "system" }, { ...themeOptions, notes: builtinNotes }, themeBase);
+check("a built-in theme is never a resource question", builtinNotes.length === 0, builtinNotes);
+const excludedNotes: string[] = [];
+const excludedTheme = buildProfileSettings(themeBase, { packages: [], theme: "terminal", exclude: { themes: ["terminal"] } }, { ...themeOptions, notes: excludedNotes }, themeBase);
+check(
+  "an explicit theme exclusion is honoured instead of overridden",
+  (excludedTheme.packages ?? []).some((entry) => packageIsDisabled(entry) && packageSourceMatches(entry, "pi-fake-theme") && (typeof entry === "string" || entry.themes === undefined)) && excludedNotes.some((note) => note.includes("excluded")),
+  { packages: excludedTheme.packages, excludedNotes },
+);
+const missingNotes: string[] = [];
+buildProfileSettings(themeBase, { theme: "nope-not-here" }, { ...themeOptions, notes: missingNotes }, themeBase);
+check("a theme nothing provides is reported", missingNotes.some((note) => note.includes("nope-not-here") && note.includes("not available")), missingNotes);
+const pairSummary = summarizeSettings(buildProfileSettings(themeBase, { packages: [], theme: "terminal" }, themeOptions, themeBase));
+check("the summary names the theme a disabled package still loads", pairSummary.some((line) => line.includes("pi-fake-theme") && line.includes("terminal kept")), pairSummary);
+check("a written force-include is recognised as ours", isThemeForceInclude("+themes/terminal.json") && !isThemeForceInclude("themes/terminal.json") && !isThemeForceInclude("+themes/*/x.json"));
 
 /* ---------------- diff + summary ---------------- */
 

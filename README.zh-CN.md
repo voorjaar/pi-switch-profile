@@ -100,7 +100,7 @@ pi -e ./extensions/switch.ts
 | `disablePackages` | `packages` | 要禁用的包来源黑名单，其余保持不变。 |
 | `exclude` | `packages`、`extensions`、`skills`、`prompts`、`themes` | 要扔掉的东西，按资源类型分开：`{ "extensions": ["review"], "skills": ["archive"] }`。单独用就是“除了这些全都开”；跟同类型的白名单一起用就是在这个白名单里再剔掉。`exclude.packages` 是 `disablePackages` 的别名。 |
 | `extensions`、`skills`、`prompts`、`themes` | 同名设置 | **白名单**：写你想保留的东西，一个词（`review`、`novel-writer`）或一个 glob（`extensions/review.ts`、`skills/nov*`）。匹配不到任何东西的就关掉，`[]` 就是“一个都不要”，所以你不需要写排除模式。见[资源白名单](#资源白名单)。 |
-| `theme` | `theme` | 主题名称，例如 `system`、`dracula`，或自定义主题名。 |
+| `theme` | `theme` | 主题名称，例如 `system`、`dracula`，或自定义主题名；也可以写 `light/dark` 一对，例如 `terminal/terminal-tinted`。被选中的主题即使它的提供者被关掉也仍然可用——见[主题可用性](#主题可用性)。 |
 | `model` | `defaultProvider`、`defaultModel` | 写成 `provider/modelId`，或只写 `modelId`。reload 之后也会作用到当前会话。 |
 | `thinkingLevel` | `defaultThinkingLevel` | 可取 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`。同样会作用到当前会话。 |
 | `tools` | `defaultTools` | 启动时的工具列表。reload 后该列表也会强制应用到当前会话，因此被移除的工具确实会消失。 |
@@ -137,6 +137,27 @@ pi -e ./extensions/switch.ts
 ```
 
 `/switch default` 会加载除 `review` 以外的全部；`/switch review` 只加载它列出的那些。
+
+### 主题可用性
+
+`theme` 和 `themes` 不是同一个开关，而且只有其中一个真的能把主题关掉。
+
+- `~/.pi/agent/themes/<名称>.json` 里的主题始终可用。pi 的主题加载器会直接读这个目录，`/theme` 列表也无视
+  `themes` 过滤器把它列出来，所以 `themes: []` 不会弄坏一个本地主题——它只是把这个资源从自动发现的资源列表里藏起来。
+- `system`、`dark`、`light` 是 pi 自带的主题，任何配置档都关不掉。
+- *包*提供的主题（比如 `pi-terminal-theme` 的 `terminal`）只在这个包加载时存在。`packages` 白名单或者
+  `exclude.packages` 把包关掉之后，`theme` 就指向了一个不存在的东西，而 pi 会默默退回系统主题。
+
+所以配置档选中的主题优先级高于会把它关掉的策略。当配置档关掉了提供所选主题的那个包时，这个条目会被保留成
+`autoload: false` 加一条强制包含——这正是 pi 自己从一个被禁用的包里只加载一个资源的做法：
+
+```json
+{ "source": "npm:pi-terminal-theme", "autoload": false, "themes": ["+themes/terminal.json"] }
+```
+
+这个包其余的东西仍然是关着的。`light/dark` 一对会两半都保留。配置档明说的事情优先：`exclude: { "themes": ["terminal"] }`
+是一句明确的“这里不要”，会被尊重而不是被覆盖。谁都提供不了的主题（写错了名字，或者包没装）会由
+`/switch show`、`/switch list`、`/switch doctor` 以及切换本身的摘要报告出来。
 
 ### 只装到某个配置档
 

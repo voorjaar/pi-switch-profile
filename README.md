@@ -100,7 +100,7 @@ Each profile is an overlay on `base`. A profile only changes the keys it declare
 | `disablePackages` | `packages` | Blacklist of package sources to disable; all others stay as they are. |
 | `exclude` | `packages`, `extensions`, `skills`, `prompts`, `themes` | What to throw away, per kind: `{ "extensions": ["review"], "skills": ["archive"] }`. Alone it means "everything except these"; with a whitelist of the same kind it narrows that whitelist. `exclude.packages` is an alias for `disablePackages`. |
 | `extensions`, `skills`, `prompts`, `themes` | same | **Whitelist** of what to keep: a term is a substring (`review`, `novel-writer`) or a glob (`extensions/review.ts`, `skills/nov*`). Everything that matches nothing is disabled, so `[]` means "none" and you never write an exclusion pattern. See [Resource whitelists](#resource-whitelists). |
-| `theme` | `theme` | Theme name, for example `system`, `dracula`, or a custom theme name. |
+| `theme` | `theme` | Theme name, for example `system`, `dracula`, or a custom theme name, or a `light/dark` pair such as `terminal/terminal-tinted`. The selected theme is kept loadable even by a profile that switches its provider off - see [Theme availability](#theme-availability). |
 | `model` | `defaultProvider`, `defaultModel` | `provider/modelId` or a bare `modelId`. Applied to the live session after the reload as well. |
 | `thinkingLevel` | `defaultThinkingLevel` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Also applied to the live session. |
 | `tools` | `defaultTools` | The startup tool list. After a reload the profile's list is enforced on the live session too, so tools removed from the profile actually go away. |
@@ -143,6 +143,31 @@ To keep an extension out of `default` but on in one profile, give `default` an `
 ```
 
 `/switch default` then loads everything except `review`; `/switch review` loads only what it lists.
+
+### Theme availability
+
+`theme` and `themes` are not the same switch, and only one of them can actually lose a theme.
+
+- A theme file in `~/.pi/agent/themes/<name>.json` is always available. pi's theme loader reads that
+  directory directly and lists it in `/theme` whatever the `themes` filter says, so `themes: []` never
+  breaks a local theme - it only hides it from the auto-discovered resource list.
+- `system`, `dark`, and `light` are pi's own themes. No profile can switch them off.
+- A theme a *package* provides (`terminal` from `pi-terminal-theme`, for example) exists only while that
+  package loads. A `packages` whitelist or `exclude.packages` that turns the package off leaves `theme`
+  naming something that no longer exists, and pi silently falls back to the system theme.
+
+So the theme a profile selects outranks the policy that would drop it. When a profile turns off the
+package that provides the selected theme, that entry is kept as `autoload: false` with a single
+force-include - pi's own way of loading one resource out of a disabled package:
+
+```json
+{ "source": "npm:pi-terminal-theme", "autoload": false, "themes": ["+themes/terminal.json"] }
+```
+
+The package stays off for everything else. A `light/dark` pair is kept on both halves. What the profile says
+outright wins: `exclude: { "themes": ["terminal"] }` is an explicit "not here" and is honoured instead of
+overridden. A theme nothing provides - a typo, or a package that is not installed - is reported by
+`/switch show`, `/switch list`, `/switch doctor`, and in the summary of the switch itself.
 
 ### Installing into one profile
 
