@@ -240,6 +240,8 @@ npm run check                # 类型检查
 
 `scripts/live-test.mjs` 会把本包安装进已备份的 `~/.pi/agent/settings.json`，启动真实 pi（RPC 模式），切到 `zen`，检查文件与 reload 后的会话（注册的命令、激活的工具、被禁用包的工具是否消失），并跑一遍 save/list/delete/refresh/restore，最后把原始设置和原始配置档存储写回。
 
+`scripts/verify-installed.mjs` 会在不带 `-e` 的情况下启动一个真实 pi 会话，因此必须由 `settings.json` 自己提供该扩展。在 `pi install npm:pi-switch-profile` 之后用它验证：检查 `/switch` 已注册、`/switch list` 能列出配置档，以及底栏状态是否以 `[<配置档名>]` 并带上主题色送达。
+
 ## 许可证
 
 MIT — 见 [LICENSE](LICENSE)。

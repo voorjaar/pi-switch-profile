@@ -281,6 +281,10 @@ RPC mode, switches to `zen`, checks the file and the reloaded session (registere
 from disabled packages), exercises save/list/delete/refresh/restore, and finally puts the original settings and
 the original profile store back.
 
+`scripts/verify-installed.mjs` runs a real pi session with no `-e` flag, so `settings.json` alone has to provide
+the extension. Use it after `pi install npm:pi-switch-profile`: it checks `/switch` is registered, `/switch list`
+reports the profiles, and the footer status arrives as `[<profile>]` with theme colors applied.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
