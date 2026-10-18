@@ -4,6 +4,8 @@ All notable changes to pi-switch-profile are documented here.
 
 ## Unreleased
 
+## 0.2.0
+
 ### Added
 
 - Added `/switch install <target> [--only <profiles>] [--kind <kind>]`. pi's own `pi install` parses a fixed option

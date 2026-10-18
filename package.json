@@ -1,6 +1,6 @@
 {
   "name": "pi-switch-profile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Switch whole pi configuration profiles with /switch - pi packages, extension, skill, prompt and theme paths, theme, default model, thinking level, default tools - then reload",
   "keywords": [
     "pi",
