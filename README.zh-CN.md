@@ -20,16 +20,22 @@
 
 ## 安装
 
-安装该包（会把包声明写入 `~/.pi/agent/settings.json`）：
+安装发布到 npm 的包（会把包声明写入 `~/.pi/agent/settings.json`）：
 
 ```bash
-pi install ./pi-switch-profile
+pi install npm:pi-switch-profile
 ```
 
 或者先临时试用，不做任何安装：
 
 ```bash
 pi -e ./extensions/switch.ts
+```
+
+如果你想直接跑仓库克隆，安装本地目录即可：
+
+```bash
+pi install ./pi-switch-profile
 ```
 
 如果手动修改了 `settings.json`，之后请执行 `/reload`。

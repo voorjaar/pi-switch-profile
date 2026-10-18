@@ -4,6 +4,10 @@ All notable changes to pi-switch-profile are documented here.
 
 ## Unreleased
 
+### Changed
+
+- Installation docs lead with `pi install npm:pi-switch-profile` now that the package is published; installing a clone of the repo is listed as the alternative.
+
 ## 0.2.0
 
 ### Added

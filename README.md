@@ -20,16 +20,22 @@ Use it to move between a stripped-down session and a fully equipped one without 
 
 ## Installation
 
-Install the package (it writes the package declaration to `~/.pi/agent/settings.json`):
+Install the published package (it writes the package declaration to `~/.pi/agent/settings.json`):
 
 ```bash
-pi install ./pi-switch-profile
+pi install npm:pi-switch-profile
 ```
 
 Or try it once without installing anything:
 
 ```bash
 pi -e ./extensions/switch.ts
+```
+
+If you would rather run from a clone of this repo, install the checkout directly.
+
+```bash
+pi install ./pi-switch-profile
 ```
 
 If you edit `settings.json` by hand, run `/reload` afterwards.
