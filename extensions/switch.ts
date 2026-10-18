@@ -1128,6 +1128,26 @@ export function buildProfileSettings(
 /* Profile summaries                                                           */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * The footer status row carries the active profile as `[<profile>]` - the brackets do the labelling,
+ * so no glyph and no `profile:` prefix is needed.
+ *
+ * pi renders extension statuses verbatim: the built-in footer paints every other row `dim` and leaves
+ * the status row in the terminal default, which reads as plain white. So the color has to be applied
+ * here, from the live theme rather than a hardcoded escape.
+ */
+
+/** The part of pi's Theme the footer label uses. Structural so the self-test can stand in for it. */
+export interface FooterTheme {
+  fg(color: "accent" | "muted" | "warning", text: string): string;
+}
+
+export function footerStatusLabel(name: string, theme: FooterTheme | undefined, options: { broken?: boolean } = {}): string {
+  if (options.broken) return theme === undefined ? `[${name} (broken)]` : theme.fg("warning", `[${name} (broken)]`);
+  if (theme === undefined) return `[${name}]`;
+  return `${theme.fg("accent", "[")}${theme.fg("muted", name)}${theme.fg("accent", "]")}`;
+}
+
 function modelSpecFromSettings(settings: ManagedSettings): string | undefined {
   const modelId = settings.defaultModel;
   if (modelId === undefined) return undefined;
@@ -1499,10 +1519,10 @@ export default function (pi: ExtensionAPI): void {
     try {
       profile = resolveProfile(active, store.profiles).profile;
     } catch {
-      ctx.ui.setStatus("pi-switch-profile", `profile ${active} (broken)`);
+      ctx.ui.setStatus("pi-switch-profile", footerStatusLabel(active, ctx.ui.theme, { broken: true }));
       return;
     }
-    ctx.ui.setStatus("pi-switch-profile", `profile: ${active}`);
+    ctx.ui.setStatus("pi-switch-profile", footerStatusLabel(active, ctx.ui.theme));
     // Only re-apply after a reload triggered by /switch. On a fresh session pi
     // already applies defaultTools / defaultModel / defaultThinkingLevel itself.
     if (event.reason === "reload") applyRuntimeProfile(pi, ctx, profile);

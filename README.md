@@ -15,7 +15,7 @@ Use it to move between a stripped-down session and a fully equipped one without 
 - **Undo.** The settings a switch replaced are recorded in a separate one-entry file (`~/.pi/agent/pi-switch-undo.json`); `/switch restore` puts them back and clears it.
 - **Session-scoped switches.** `revertSession` puts the session back on the default configuration at session start (the default) or at session close, so a switch you only wanted for now does not leak into the next session.
 - **Seeded profiles.** `zen` (zero skills, zero extensions) and `default` (everything from the base snapshot) are created on first use.
-- **Visible state.** The footer shows the active profile, and `/switch` prints the resolved configuration and the exact changes. If you edit `settings.json` by hand afterwards, `/switch` and `/switch doctor` say so instead of pretending the profile is applied.
+- **Visible state.** The footer shows the active profile as `[<profile>]` in the theme's accent/muted colors, and `/switch` prints the resolved configuration and the exact changes. If you edit `settings.json` by hand afterwards, `/switch` and `/switch doctor` say so instead of pretending the profile is applied.
 - **Autocomplete.** Profile names complete as command arguments.
 
 ## Installation

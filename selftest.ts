@@ -22,6 +22,8 @@ import {
   diffSettings,
   detectDrift,
   ensureBase,
+  type FooterTheme,
+  footerStatusLabel,
   isBaselineProfile,
   isThemeForceInclude,
   isSelfPackageSource,
@@ -1078,6 +1080,23 @@ check(
 );
 rmSync(installFixture, { recursive: true, force: true });
 rmSync(installCwd, { recursive: true, force: true });
+
+const fakeTheme: FooterTheme = { fg: (color, text) => `${color}:${text}` };
+check(
+  "the footer labels the active profile with brackets, colored by the theme",
+  footerStatusLabel("default", fakeTheme) === "accent:[muted:defaultaccent:]",
+  footerStatusLabel("default", fakeTheme),
+);
+check(
+  "a profile that no longer resolves is still named in the footer, in the warning color",
+  footerStatusLabel("zen", fakeTheme, { broken: true }) === "warning:[zen (broken)]",
+  footerStatusLabel("zen", fakeTheme, { broken: true }),
+);
+check(
+  "a footer label is still produced when the mode has no theme",
+  footerStatusLabel("default", undefined) === "[default]",
+  footerStatusLabel("default", undefined),
+);
 
 console.log(`${checks - failures}/${checks} checks passed`);
 if (failures > 0) {

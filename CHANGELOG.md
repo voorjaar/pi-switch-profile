@@ -54,6 +54,10 @@ All notable changes to pi-switch-profile are documented here.
 
 ### Changed
 
+- The footer status is shorter and colored: `[<profile>]` - brackets in the theme's accent color, the name in
+  muted - instead of `profile: <profile>` in the terminal default white. pi renders extension status text verbatim,
+  so the color is applied here from `ctx.ui.theme`. A profile that no longer resolves shows as
+  `[<profile> (broken)]` in the warning color.
 - The undo record no longer lives in the profile store. The settings before the last switch are written to
   `~/.pi/agent/pi-switch-undo.json` and `/switch restore` clears it, so `pi-switch-profile.json` holds only
   `base`, profiles, the active profile, and the revert option. The `history` array (up to 12 full settings
