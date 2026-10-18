@@ -4,9 +4,12 @@ All notable changes to pi-switch-profile are documented here.
 
 ## Unreleased
 
+## 0.2.1
+
 ### Changed
 
 - Installation docs lead with `pi install npm:pi-switch-profile` now that the package is published; installing a clone of the repo is listed as the alternative.
+- New `scripts/verify-installed.mjs`: a real pi session with no `-e` flag, so `settings.json` alone has to provide the extension (`/switch` registered, `/switch list` reports profiles, footer `[<profile>]` in theme colors).
 
 ## 0.2.0
 
