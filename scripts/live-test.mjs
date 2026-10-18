@@ -9,9 +9,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,6 +30,7 @@ const storeBackupPaths = storePaths.map((path) => `${path}.live-test.bak`);
 
 const results = [];
 const notifications = [];
+const statusUpdates = [];
 let pendingId = 0;
 const waiters = new Map();
 
@@ -68,6 +69,157 @@ function readStore() {
   return {};
 }
 
+/** A package entry's source string, whichever form settings.json used for it. */
+function packageSourceOf(entry) {
+  return String(typeof entry === "string" ? entry : entry?.source ?? "");
+}
+
+/** `autoload: false` is how a profile writes "this package is off". */
+function isDisabledEntry(entry) {
+  return typeof entry === "object" && entry !== null && entry.autoload === false;
+}
+
+/**
+ * The live store is the user's own, so "every package enabled" cannot mean "every entry is a plain
+ * string": a `default` profile that deliberately keeps a package off (its own `exclude.packages`) is
+ * intended state, and a profile policy may rewrite an entry's *form* while keeping the same source.
+ * Assertions about enablement therefore name what is unexpectedly off instead of demanding an
+ * identical list.
+ */
+function deliberateExclusions() {
+  const profile = readStore().profiles?.default ?? {};
+  return [...(profile.disablePackages ?? []), ...(profile.exclude?.packages ?? [])].map((term) => String(term).toLowerCase());
+}
+
+function unexpectedlyDisabled(settings, expected = []) {
+  const allowed = deliberateExclusions().concat(expected.map((term) => String(term).toLowerCase()));
+  return (settings.packages ?? [])
+    .filter(isDisabledEntry)
+    .map(packageSourceOf)
+    .filter((source) => !allowed.some((term) => source.includes(term)));
+}
+
+/**
+ * settings.json can name this same checkout more than once - a relative entry and an absolute one are
+ * different package sources - and self-preservation keeps every one of them enabled. Resolve the
+ * source rather than matching a name.
+ */
+function resolvesToRepoRoot(source) {
+  if (source.startsWith("npm:") || source.startsWith("git:")) return false;
+  return resolve(isAbsolute(source) ? source : join(agentDir, source)) === repoRoot;
+}
+
+/** pi's install root for a package source, mirroring DefaultPackageManager. */
+function packageInstallRoot(source) {
+  const stripRef = (value) => {
+    const at = value.lastIndexOf("@");
+    return at > 0 ? value.slice(0, at) : value;
+  };
+  if (source.startsWith("npm:")) return join(agentDir, "npm", "node_modules", stripRef(source.slice(4)));
+  if (source.startsWith("git:")) return join(agentDir, "git", stripRef(source.slice(4)));
+  return resolve(isAbsolute(source) ? source : join(agentDir, source));
+}
+
+/**
+ * The theme checks need a package that really ships themes. Find one among what is installed
+ * instead of assuming a particular package is there, and skip a theme a local
+ * `<agentDir>/themes/<name>.json` would shadow.
+ */
+function themeFixture() {
+  for (const entry of readSettings().packages ?? []) {
+    const source = packageSourceOf(entry);
+    const themesDir = join(packageInstallRoot(source), "themes");
+    if (!existsSync(themesDir)) continue;
+    for (const file of readdirSync(themesDir)) {
+      if (!file.endsWith(".json")) continue;
+      let name;
+      try {
+        name = JSON.parse(readFileSync(join(themesDir, file), "utf8")).name;
+      } catch {
+        continue;
+      }
+      if (typeof name !== "string" || name.length === 0) continue;
+      if (["system", "dark", "light"].includes(name)) continue;
+      if (existsSync(join(agentDir, "themes", `${name}.json`))) continue;
+      return { source, file, theme: name };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A run that was interrupted leaves its own fingerprints in the live agent dir: the probe extension
+ * file, `!extensions/zzz-switch-live.ts` in settings.json, that term in every profile's exclude list,
+ * and the profiles the run wrote. Clean them before taking the backup, so the run starts from a sane
+ * configuration and restores one - otherwise the residue fails the next run (the probe is denied
+ * before the install check) and stays in the user's configuration forever.
+ */
+const PROBE_FILE_NAME = "zzz-switch-live.ts";
+const TEST_PROFILE_NAMES = ["keep", "no-web", "theme-only", "snapshot", "last", "doctor"];
+
+function cleanTestResidue() {
+  const probePath = join(agentDir, "extensions", PROBE_FILE_NAME);
+  if (existsSync(probePath)) {
+    try {
+      if (readFileSync(probePath, "utf8").includes("pi-switch-profile live test probe")) unlinkSync(probePath);
+    } catch {
+      // Not ours to remove.
+    }
+  }
+
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+    let changed = false;
+    for (const kind of ["extensions", "skills", "prompts", "themes"]) {
+      const list = settings[kind];
+      if (!Array.isArray(list)) continue;
+      const kept = list.filter((entry) => !String(entry).includes(PROBE_FILE_NAME));
+      if (kept.length !== list.length) {
+        settings[kind] = kept;
+        changed = true;
+      }
+    }
+    if (changed) writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  } catch {
+    // settings.json is re-read below; an unparseable file is not this step's problem.
+  }
+
+  for (const path of profileStorePaths) {
+    if (!existsSync(path)) continue;
+    let store;
+    try {
+      store = JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      continue;
+    }
+    let changed = false;
+    for (const name of TEST_PROFILE_NAMES) {
+      if (store.profiles?.[name] !== undefined) {
+        delete store.profiles[name];
+        changed = true;
+      }
+    }
+    for (const profile of Object.values(store.profiles ?? {})) {
+      for (const kind of ["extensions", "skills", "prompts", "themes", "packages"]) {
+        const list = profile.exclude?.[kind];
+        if (!Array.isArray(list)) continue;
+        const kept = list.filter((term) => !String(term).includes(PROBE_FILE_NAME));
+        if (kept.length === list.length) continue;
+        changed = true;
+        if (kept.length > 0) profile.exclude[kind] = kept;
+        else delete profile.exclude[kind];
+      }
+      if (profile.exclude !== undefined && Object.keys(profile.exclude).length === 0) delete profile.exclude;
+      if (Array.isArray(profile.extensions) && profile.extensions.every((term) => String(term).includes(PROBE_FILE_NAME))) {
+        delete profile.extensions;
+        changed = true;
+      }
+    }
+    if (store.activeProfile !== undefined && store.profiles?.[store.activeProfile] === undefined) delete store.activeProfile;
+    if (changed) writeFileSync(path, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  }
+}
+
 function readUndo() {
   try {
     return JSON.parse(readFileSync(undoPath, "utf8"));
@@ -85,17 +237,21 @@ function attachSession(child) {
   let buffer = "";
   child.stdout.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
-    let newline;
-    while ((newline = buffer.indexOf("\n")) >= 0) {
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
-      if (line.length === 0) continue;
-      handleLine(line);
+      if (line.length > 0) handleLine(line);
+      newline = buffer.indexOf("\n");
     }
   });
   child.stderr.on("data", (chunk) => process.stderr.write(`[pi] ${chunk}`));
   return new Promise((resolve) => child.on("exit", (code, signal) => resolve({ code, signal })));
 }
+
+const ESC = String.fromCharCode(27);
+const ANSI_CODES = new RegExp(`${ESC}\\[[0-9;]*m`, "g");
+const SGR_TRUECOLOR = new RegExp(`${ESC}\\[38;2;`);
 
 function handleLine(line) {
   let record;
@@ -107,6 +263,9 @@ function handleLine(line) {
   if (record.type === "extension_ui_request" && record.method === "notify") {
     notifications.push(String(record.message ?? ""));
   }
+  if (record.type === "extension_ui_request" && record.method === "setStatus") {
+    statusUpdates.push({ key: String(record.statusKey ?? ""), text: String(record.statusText ?? "") });
+  }
   if (record.id && waiters.has(record.id)) {
     const settle = waiters.get(record.id);
     waiters.delete(record.id);
@@ -117,6 +276,7 @@ function handleLine(line) {
 async function main() {
   if (!existsSync(extensionPath)) throw new Error(`missing extension entry: ${extensionPath}`);
   if (!existsSync(settingsPath)) throw new Error(`no settings.json at ${settingsPath}`);
+  cleanTestResidue();
   copyFileSync(settingsPath, backupPath);
   // The extension keeps its own store next to settings.json; back up both the current and
   // the pre-rename name so a run that triggers the file migration still restores the real
@@ -128,8 +288,12 @@ async function main() {
   const before = readSettings();
   // Install this package the way a user would, so the run exercises the real
   // path: the extension is loaded from settings.packages, and "zen" has to keep
-  // that entry enabled or /switch would disappear after the reload.
-  const installed = { ...before, packages: [...(before.packages ?? []), repoRoot] };
+  // that entry enabled or /switch would disappear after the reload. If settings.json
+  // already names this checkout - under any source form - do not add a second entry,
+  // or every count in the run is off by one.
+  const beforePackages = before.packages ?? [];
+  const alreadyInstalled = beforePackages.some((entry) => resolvesToRepoRoot(packageSourceOf(entry)));
+  const installed = { ...before, packages: alreadyInstalled ? [...beforePackages] : [...beforePackages, repoRoot] };
   writeFileSync(settingsPath, `${JSON.stringify(installed, null, 2)}\n`, "utf8");
   // revertSession defaults to "start", and a start revert would rewrite the run's own
   // baseline before the first command. Turn it off for the first session and re-arm it
@@ -231,12 +395,27 @@ async function main() {
     );
     check("/switch zen reported changes", applied, notifications.slice(-2).join(" | "));
 
+    // The footer is a setStatus call, which rpc mode forwards as statusText. pi renders the status
+    // row verbatim, so the brackets, the name, and the theme color all have to be in that string.
+    const footerStatus = statusUpdates.filter((entry) => entry.key === "pi-switch-profile").slice(-1)[0];
+    const plainFooter = footerStatus === undefined ? undefined : footerStatus.text.replace(ANSI_CODES, "");
+    check(
+      "the footer brackets the profile name and colors it",
+      plainFooter === "[zen]" && SGR_TRUECOLOR.test(footerStatus.text),
+      JSON.stringify(footerStatus),
+    );
+
     const after = readSettings();
-    const total = (installed.packages ?? []).length;
-    const enabled = (after.packages ?? []).filter((entry) => typeof entry === "string");
-    const disabled = (after.packages ?? []).filter((entry) => entry && entry.autoload === false);
-    check("zen disabled the other packages", enabled.length + disabled.length === total && disabled.length > 0, `${enabled.length} enabled / ${disabled.length} disabled of ${total}`);
-    check("zen kept its own package enabled", enabled.some((entry) => String(entry).includes("pi-switch")), enabled.join(", "));
+    const enabled = (after.packages ?? []).filter((entry) => !isDisabledEntry(entry));
+    const disabled = (after.packages ?? []).filter(isDisabledEntry);
+    check(
+      "zen disabled the other packages",
+      enabled.length + disabled.length === (after.packages ?? []).length
+        && disabled.length > 0
+        && enabled.every((entry) => resolvesToRepoRoot(packageSourceOf(entry))),
+      `${enabled.length} enabled / ${disabled.length} disabled of ${(after.packages ?? []).length}: ${enabled.map(packageSourceOf).join(", ")}`,
+    );
+    check("zen kept its own package enabled", enabled.some((entry) => resolvesToRepoRoot(packageSourceOf(entry))), enabled.map(packageSourceOf).join(", "));
     check("zen set theme system", after.theme === "system", after.theme);
     check("zen kept unmanaged settings", after.compaction !== undefined && after.defaultModel === before.defaultModel);
     check("zen set defaultTools", JSON.stringify(after.defaultTools) === JSON.stringify(["read", "bash", "edit", "write"]), JSON.stringify(after.defaultTools));
@@ -337,7 +516,14 @@ async function main() {
       "switch base summary notification",
     );
     const restored = readSettings();
-    check("base puts the captured settings back", JSON.stringify(restored.packages) === JSON.stringify(installed.packages));
+    // The package *set* is what comes back; a profile policy decides each entry's form (plain string
+    // vs `autoload: false`), so the run compares sources rather than the exact JSON it started with.
+    check(
+      "base puts the captured settings back",
+      (restored.packages ?? []).length === (installed.packages ?? []).length
+        && JSON.stringify((restored.packages ?? []).map(packageSourceOf).sort()) === JSON.stringify((installed.packages ?? []).map(packageSourceOf).sort()),
+      (restored.packages ?? []).map(packageSourceOf),
+    );
     check("base restores the theme", restored.theme === before.theme, restored.theme);
 
     await runSlash("/switch refresh");
@@ -362,7 +548,7 @@ async function main() {
     const afterDefault = readSettings();
     check(
       "default re-enables every known package",
-      (afterDefault.packages ?? []).length === (installed.packages ?? []).length && (afterDefault.packages ?? []).every((entry) => typeof entry === "string"),
+      (afterDefault.packages ?? []).length === (installed.packages ?? []).length && unexpectedlyDisabled(afterDefault).length === 0,
       JSON.stringify(afterDefault.packages ?? []).slice(0, 300),
     );
     check("default drops the zen tool list", afterDefault.defaultTools === undefined, JSON.stringify(afterDefault.defaultTools));
@@ -386,6 +572,7 @@ async function main() {
       "no-web": { description: "everything except pi-web-access", exclude: { packages: ["pi-web-access"] } },
     };
     writeFileSync(profileStorePaths[0], JSON.stringify(storeOnDisk), "utf8");
+    const packagesBeforeExclude = (readSettings().packages ?? []).length;
     await runSlash("/switch no-web");
     await waitFor(
       () => lastNotification((text) => text.includes('profile "no-web"')) !== undefined,
@@ -403,8 +590,8 @@ async function main() {
     );
     check(
       "exclude keeps every other package enabled",
-      (afterExclude.packages ?? []).length === (installed.packages ?? []).length,
-      (afterExclude.packages ?? []).length,
+      (afterExclude.packages ?? []).length === packagesBeforeExclude,
+      `${(afterExclude.packages ?? []).length} entries, was ${packagesBeforeExclude}`,
     );
 
     /*
@@ -468,22 +655,20 @@ async function main() {
     const namesAfterRestore = await commandNames();
     check("the resource is loadable again after restore", namesAfterRestore.includes("zzz-switch-live"), namesAfterRestore.length);
 
-    const themeSource = (readSettings().packages ?? [])
-      .map((entry) => (typeof entry === "string" ? entry : entry?.source))
-      .find((source) => String(source).includes("pi-terminal-theme"));
-    if (themeSource !== undefined) {
-      await runSlash(`/switch install ${themeSource} --only keep`);
+    const fixture = themeFixture();
+    if (fixture === undefined) {
+      check("a package that provides themes is installed for the theme checks", false, "no installed package has a themes/ directory");
+    } else {
+      await runSlash(`/switch install ${fixture.source} --only keep`);
       await waitFor(
-        () => lastNotification((text) => text.includes(`install ${themeSource}`)) !== undefined,
+        () => lastNotification((text) => text.includes(`install ${fixture.source}`)) !== undefined,
         120_000,
         "package install summary notification",
       );
-      const disabledPackages = (readSettings().packages ?? [])
-        .filter((entry) => typeof entry === "object" && entry !== null && entry.autoload === false)
-        .map((entry) => String(entry.source));
+      const disabledPackages = (readSettings().packages ?? []).filter(isDisabledEntry).map(packageSourceOf);
       check(
         "install --only disables the package for every other profile",
-        disabledPackages.length === 1 && disabledPackages[0].includes("pi-terminal-theme"),
+        disabledPackages.includes(fixture.source) && unexpectedlyDisabled(readSettings(), [fixture.source]).length === 0,
         JSON.stringify(disabledPackages),
       );
       const storeAfterPackage = readStore();
@@ -497,11 +682,43 @@ async function main() {
       await waitFor(() => lastNotification((text) => text.includes("restored")) !== undefined, 120_000, "restore after the package install");
       check(
         "restore re-enables the package",
-        (readSettings().packages ?? []).every((entry) => typeof entry === "string"),
-        JSON.stringify(readSettings().packages ?? []).slice(0, 200),
+        (readSettings().packages ?? []).some((entry) => !isDisabledEntry(entry) && packageSourceOf(entry) === fixture.source)
+          && unexpectedlyDisabled(readSettings()).length === 0,
+        (readSettings().packages ?? []).filter(isDisabledEntry).map(packageSourceOf),
       );
-    } else {
-      check("package install check needs pi-terminal-theme installed", false, "not in settings.json");
+
+      // The theme a profile selects outranks the policy that would switch its provider off.
+      const themeStore = readStore();
+      themeStore.profiles = {
+        ...(themeStore.profiles ?? {}),
+        "theme-only": { description: "packages off, package theme kept", packages: [], theme: fixture.theme },
+      };
+      writeFileSync(storePaths[0], `${JSON.stringify(themeStore, null, 2)}\n`, "utf8");
+      await runSlash("/switch theme-only");
+      await waitFor(() => lastNotification((text) => text.includes('profile "theme-only"')) !== undefined, 120_000, "theme-only switch summary");
+      const themeEntry = (readSettings().packages ?? []).find((entry) => packageSourceOf(entry) === fixture.source);
+      check(
+        "a profile that turns packages off keeps the package that provides its theme, for that theme only",
+        themeEntry !== undefined && isDisabledEntry(themeEntry) && JSON.stringify(themeEntry.themes) === JSON.stringify([`+themes/${fixture.file}`]),
+        JSON.stringify(themeEntry),
+      );
+      check("the theme the profile selected is the one written", readSettings().theme === fixture.theme, readSettings().theme);
+      const themeReport = notifications.slice(-12).join("\n");
+      check(
+        "the switch summary says which package the theme kept",
+        themeReport.includes(fixture.source) && themeReport.includes("kept for that theme only"),
+        themeReport.slice(-300),
+      );
+      const themeCommands = await commandNames();
+      check("/switch survives the theme keep reload", themeCommands.includes("switch"), themeCommands.length);
+
+      await runSlash("/switch default");
+      await waitFor(() => lastNotification((text) => text.includes('profile "default"')) !== undefined, 120_000, "back to default after theme-only");
+      check(
+        "a profile that enables the package takes the theme force-include back off",
+        (readSettings().packages ?? []).some((entry) => !isDisabledEntry(entry) && packageSourceOf(entry) === fixture.source),
+        (readSettings().packages ?? []).find((entry) => packageSourceOf(entry) === fixture.source),
+      );
     }
 
     await runSlash("/switch install zzz-switch-live");
@@ -570,7 +787,7 @@ async function main() {
       "closing the session reverted to the default configuration",
       afterQuit.theme === before.theme
         && (afterQuit.packages ?? []).length === (installed.packages ?? []).length
-        && (afterQuit.packages ?? []).every((entry) => typeof entry === "string")
+        && unexpectedlyDisabled(afterQuit).length === 0
         && afterQuit.defaultTools === undefined,
       { theme: afterQuit.theme, defaultTools: afterQuit.defaultTools, packages: (afterQuit.packages ?? []).length },
     );
@@ -635,7 +852,7 @@ async function main() {
       "the start revert put the default configuration back",
       afterStart.theme === before.theme
         && afterStart.defaultTools === undefined
-        && (afterStart.packages ?? []).every((entry) => typeof entry === "string"),
+        && unexpectedlyDisabled(afterStart).length === 0,
       { theme: afterStart.theme, defaultTools: afterStart.defaultTools, packages: (afterStart.packages ?? []).length },
     );
     check("the start revert recorded the profile it returned to", readStore().activeProfile === "default", readStore().activeProfile);
